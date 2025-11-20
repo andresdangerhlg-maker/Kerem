@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Panel de Control - Canon Jet</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 20px;
+      background: #f5f5f5;
+    }
+    h1 {
+      color: #333;
+    }
+    .section {
+      background: white;
+      border-radius: 10px;
+      padding: 20px;
+      margin-bottom: 20px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.1);
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 10px;
+    }
+    th, td {
+      border: 1px solid #ccc;
+      padding: 8px;
+      text-align: left;
+    }
+    th {
+      background: #eee;
+    }
+    img {
+      width: 50px;
+      height: 50px;
+      object-fit: cover;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    #preview {
+      display: none;
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(0,0,0,0.8);
+      justify-content: center;
+      align-items: center;
+    }
+    #preview img {
+      width: auto;
+      max-width: 80%;
+      max-height: 80%;
+      border-radius: 10px;
+      box-shadow: 0 0 15px rgba(0,0,0,0.5);
+    }
+  </style>
+</head>
+<body>
+  <h1>?? Panel de Inventario</h1>
+
+  <div class="section">
+    <h2>Inventario</h2>
+    <table id="tablaInventario">
+      <thead>
+        <tr>
+          <th>Producto</th>
+          <th>Precio Base</th>
+          <th>Stock</th>
+          <th>Imagen</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <div id="preview" onclick="cerrarPreview()">
+    <img id="imagenAmpliada" src="" alt="Vista Ampliada">
+  </div>
+
+  <script>
+    async function cargarInventario() {
+      const res = await fetch('/api/inventario');
+      const data = await res.json();
+      const tbody = document.querySelector('#tablaInventario tbody');
+      tbody.innerHTML = '';
+      data.forEach(item => {
+        const fila = document.createElement('tr');
+        fila.innerHTML = `
+          <td>${item.nombre}</td>
+          <td>$${item.precio_base.toFixed(2)}</td>
+          <td>${item.stock}</td>
+          <td><img src="${item.imagen}" onclick="verImagen('${item.imagen}')"></td>
+        `;
+        tbody.appendChild(fila);
+      });
+    }
+
+    function verImagen(src) {
+      const preview = document.getElementById('preview');
+      const imagen = document.getElementById('imagenAmpliada');
+      imagen.src = src;
+      preview.style.display = 'flex';
+    }
+
+    function cerrarPreview() {
+      document.getElementById('preview').style.display = 'none';
+    }
+
+    cargarInventario();
+  </script>
+</body>
+</html>
