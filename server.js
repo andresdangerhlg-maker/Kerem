@@ -9,7 +9,10 @@ const multer = require("multer");
 const fs = require("fs");
 
 const app = express();
-const PORT = 4000;
+
+// Render ignora el puerto local.
+// Usamos la variable de entorno si existe.
+const PORT = process.env.PORT || 4000;
 
 app.use(cors());
 app.use(express.json());
@@ -49,7 +52,7 @@ const db = new sqlite3.Database(DB_PATH, (err) => {
 // CREAR TABLAS
 // ------------------------
 db.serialize(() => {
-  // USUARIOS
+  // Usuarios
   db.run(`
     CREATE TABLE IF NOT EXISTS usuarios (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -61,7 +64,7 @@ db.serialize(() => {
     )
   `);
 
-  // INVENTARIO
+  // Inventario
   db.run(`
     CREATE TABLE IF NOT EXISTS inventario (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -74,7 +77,7 @@ db.serialize(() => {
     )
   `);
 
-  // PEDIDOS (ya incluye fecha_entregado)
+  // Pedidos
   db.run(`
     CREATE TABLE IF NOT EXISTS pedidos (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -95,7 +98,7 @@ db.serialize(() => {
     )
   `);
 
-  // DETALLES
+  // Detalles
   db.run(`
     CREATE TABLE IF NOT EXISTS pedido_detalle (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -109,14 +112,14 @@ db.serialize(() => {
     )
   `);
 
-  // Asegurar columna fecha_entregado si la BD es vieja
+  // Añadir fecha_entregado si falta
   db.all("PRAGMA table_info(pedidos)", (err, rows) => {
     if (!rows.some((c) => c.name === "fecha_entregado")) {
       db.run("ALTER TABLE pedidos ADD COLUMN fecha_entregado TEXT");
     }
   });
 
-  // USUARIOS DE PRUEBA
+  // Usuarios iniciales
   db.get("SELECT COUNT(*) AS total FROM usuarios", [], (err, row) => {
     if (row.total === 0) {
       db.run(`
@@ -124,12 +127,12 @@ db.serialize(() => {
         VALUES
           ('gestor','123','gestor','00000000','0000'),
           ('empresa','123','empresa','00000000','0000'),
-          ('empresaa','123','empresa','00000000','0000'),
           ('repartidor','123','repartidor','00000000','0000')
       `);
     }
   });
 });
+
 
 // ------------------------
 // LOGIN
@@ -148,8 +151,9 @@ app.post("/api/login", (req, res) => {
   );
 });
 
+
 // ------------------------
-// USUARIOS CRUD
+// CRUD USUARIOS
 // ------------------------
 app.get("/api/usuarios", (req, res) => {
   const { rol } = req.query;
@@ -199,6 +203,7 @@ app.delete("/api/usuarios/:id", (req, res) => {
   );
 });
 
+
 // ------------------------
 // INVENTARIO CRUD
 // ------------------------
@@ -226,7 +231,6 @@ app.post("/api/inventario", upload.single("imagen"), (req, res) => {
   );
 });
 
-// Actualizar producto
 app.put("/api/inventario/:id", upload.single("imagen"), (req, res) => {
   const { nombre, descripcion, precio_base, cantidad, imagen_actual } = req.body;
   const imagen = req.file ? req.file.filename : imagen_actual;
@@ -242,12 +246,12 @@ app.put("/api/inventario/:id", upload.single("imagen"), (req, res) => {
   );
 });
 
-// Eliminar producto
 app.delete("/api/inventario/:id", (req, res) => {
   db.run("DELETE FROM inventario WHERE id = ?", [req.params.id], () =>
     res.json({ mensaje: "Producto eliminado" })
   );
 });
+
 
 // ------------------------
 // CREAR PEDIDO
@@ -342,8 +346,10 @@ app.post("/api/pedidos", (req, res) => {
     }
   );
 });
+
+
 // ------------------------
-// LISTA PEDIDOS COMPLETA
+// LISTAR TODOS LOS PEDIDOS
 // ------------------------
 app.get("/api/pedidos", (req, res) => {
   db.all(
@@ -356,8 +362,9 @@ app.get("/api/pedidos", (req, res) => {
   );
 });
 
+
 // ------------------------
-// PEDIDOS DE UN GESTOR
+// PEDIDOS POR GESTOR
 // ------------------------
 app.get("/api/pedidos/gestor/:id", (req, res) => {
   db.all(
@@ -378,9 +385,9 @@ app.get("/api/pedidos/gestor/:id", (req, res) => {
   );
 });
 
-// ------------------------
-// NUEVO ? PEDIDOS POR REPARTIDOR
-// ------------------------
+// -----------------------
+// NUEVO: PEDIDOS POR REPARTIDOR
+// -----------------------
 app.get("/api/pedidos/repartidor/:id", (req, res) => {
   const id = req.params.id;
 
@@ -402,6 +409,7 @@ app.get("/api/pedidos/repartidor/:id", (req, res) => {
     }
   );
 });
+
 
 // ------------------------
 // DETALLE DE PEDIDO
@@ -447,6 +455,7 @@ app.get("/api/pedidos/:id", (req, res) => {
   );
 });
 
+
 // ------------------------
 // APROBAR Y ASIGNAR REPARTIDOR
 // ------------------------
@@ -469,8 +478,34 @@ app.put("/api/pedidos/:id/asignar", (req, res) => {
   );
 });
 
+
 // ------------------------
-// ENTREGAR PEDIDO ? (CON FECHA_ENTREGADO)
+// **NUEVO: RECHAZAR PEDIDO**
+// ------------------------
+app.put("/api/pedidos/rechazar/:id", (req, res) => {
+  const id = req.params.id;
+
+  db.run(
+    `
+    UPDATE pedidos
+    SET estado = 'rechazado'
+    WHERE id = ?
+    `,
+    [id],
+    (err) => {
+      if (err) {
+        console.error("Error rechazando pedido:", err);
+        return res.status(500).json({ error: "Error rechazando pedido" });
+      }
+
+      return res.json({ mensaje: "Pedido rechazado correctamente" });
+    }
+  );
+});
+
+
+// ------------------------
+// ENTREGAR PEDIDO
 // ------------------------
 app.post("/api/pedidos/:id/entregar", (req, res) => {
   const pedidoId = req.params.id;
@@ -481,7 +516,7 @@ app.post("/api/pedidos/:id/entregar", (req, res) => {
     [];
 
   if (!Array.isArray(lista) || lista.length === 0) {
-    return res.status(400).json({ error: "Lista vac�a" });
+    return res.status(400).json({ error: "Lista vacía" });
   }
 
   lista.forEach((item) => {
@@ -539,8 +574,9 @@ app.post("/api/pedidos/:id/entregar", (req, res) => {
   );
 });
 
+
 // ------------------------
-// HISTORIAL LOCAL (SOLO ENTREGADOS)
+// HISTORIALES
 // ------------------------
 app.get("/api/historial/local/dia/:fecha", (req, res) => {
   const f = req.params.fecha;
@@ -567,9 +603,10 @@ app.get("/api/historial/local/dia/:fecha", (req, res) => {
   );
 });
 
-// ------------------------
+
+// ----------------------------
 // HISTORIAL DOMICILIO
-// ------------------------
+// ----------------------------
 app.get("/api/historial/domicilio/dia/:fecha", (req, res) => {
   const f = req.params.fecha;
 
@@ -597,9 +634,10 @@ app.get("/api/historial/domicilio/dia/:fecha", (req, res) => {
   );
 });
 
-// ------------------------
+
+// ----------------------------
 // HISTORIAL POR GESTOR
-// ------------------------
+// ----------------------------
 app.get("/api/historial/gestor/:id/:fecha", (req, res) => {
   const id = req.params.id;
   const f = req.params.fecha;
@@ -628,9 +666,10 @@ app.get("/api/historial/gestor/:id/:fecha", (req, res) => {
   );
 });
 
-// ------------------------
-// HISTORIAL POR REPARTIDOR (NUEVO ?)
-// ------------------------
+
+// ----------------------------
+// HISTORIAL POR REPARTIDOR
+// ----------------------------
 app.get("/api/historial/repartidor/:id/:fecha", (req, res) => {
   const id = req.params.id;
   const f = req.params.fecha;
@@ -657,9 +696,10 @@ app.get("/api/historial/repartidor/:id/:fecha", (req, res) => {
   );
 });
 
-// ------------------------
-// RESUMEN DEL DIA POR GESTOR
-// ------------------------
+
+// ----------------------------
+// RESUMEN DEL DÍA POR GESTOR
+// ----------------------------
 app.get("/api/historial/resumen/:fecha", (req, res) => {
   const fecha = req.params.fecha;
   const resumen = {};
@@ -721,10 +761,10 @@ app.get("/api/historial/resumen/:fecha", (req, res) => {
   );
 });
 
-// ------------------------
-// INICIO SERVER
-// ------------------------
-app.listen(PORT, () => {
-  console.log("Servidor API listo en http://localhost:" + PORT);
-});
 
+// ----------------------------
+// INICIAR SERVIDOR
+// ----------------------------
+app.listen(PORT, () => {
+  console.log("Servidor API listo en puerto:", PORT);
+});
