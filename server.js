@@ -1032,6 +1032,48 @@ app.get("/api/historial/resumen/:fecha", (req, res) => {
 });
 
 // ----------------------------------------
+// RUTAS DE ANUNCIOS
+// ----------------------------------------
+
+// Obtener anuncio actual
+app.get("/api/anuncio", (req, res) => {
+  db.get(
+    "SELECT mensaje FROM anuncios ORDER BY id DESC LIMIT 1",
+    [],
+    (err, row) => {
+      if (err) {
+        return res.status(500).json({ error: "Error cargando anuncio" });
+      }
+      res.json({ mensaje: row ? row.mensaje : "" });
+    }
+  );
+});
+
+// Guardar anuncio nuevo
+app.post("/api/anuncio", (req, res) => {
+  const { mensaje } = req.body;
+
+  if (!mensaje || mensaje.trim() === "") {
+    return res.status(400).json({ error: "Mensaje vacío" });
+  }
+
+  db.run(
+    `
+    INSERT INTO anuncios (mensaje, fecha_creacion)
+    VALUES (?, ?)
+    `,
+    [mensaje, ahora()],
+    function (err) {
+      if (err) {
+        return res.status(500).json({ error: "No se pudo guardar el anuncio" });
+      }
+
+      res.json({ mensaje: "Anuncio guardado correctamente" });
+    }
+  );
+});
+
+// ----------------------------------------
 // INICIAR SERVIDOR
 // ----------------------------------------
 app.listen(PORT, () => {
