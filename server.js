@@ -94,6 +94,8 @@ const db = new sqlite3.Database(DB_PATH, (err) => {
 // CREAR TABLAS
 // ----------------------------------------
 db.serialize(() => {
+
+  // --- TABLA USUARIOS
   db.run(`
     CREATE TABLE IF NOT EXISTS usuarios (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -106,6 +108,7 @@ db.serialize(() => {
     )
   `);
 
+  // --- TABLA INVENTARIO
   db.run(`
     CREATE TABLE IF NOT EXISTS inventario (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -118,6 +121,7 @@ db.serialize(() => {
     )
   `);
 
+  // --- TABLA PEDIDOS
   db.run(`
     CREATE TABLE IF NOT EXISTS pedidos (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -138,6 +142,7 @@ db.serialize(() => {
     )
   `);
 
+  // --- TABLA DETALLE PEDIDOS
   db.run(`
     CREATE TABLE IF NOT EXISTS pedido_detalle (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -151,17 +156,25 @@ db.serialize(() => {
     )
   `);
 
-  // Asegurar columna fecha_entregado en pedidos
-  db.all("PRAGMA table_info(pedidos)", (err, rows) => {
-    if (!rows.some((c) => c.name === "fecha_entregado")) {
-      db.run("ALTER TABLE pedidos ADD COLUMN fecha_entregado TEXT");
-    }
-  });
+  // --- TABLA ANUNCIOS (NUEVA)
+  db.run(`
+    CREATE TABLE IF NOT EXISTS anuncios (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      mensaje TEXT,
+      fecha_creacion TEXT
+    )
+  `);
 
-  // Asegurar columna expo_push_token en usuarios
+  // Asegurar columnas nuevas
   db.all("PRAGMA table_info(usuarios)", (err, rows) => {
     if (!rows.some((c) => c.name === "expo_push_token")) {
       db.run("ALTER TABLE usuarios ADD COLUMN expo_push_token TEXT");
+    }
+  });
+
+  db.all("PRAGMA table_info(pedidos)", (err, rows) => {
+    if (!rows.some((c) => c.name === "fecha_entregado")) {
+      db.run("ALTER TABLE pedidos ADD COLUMN fecha_entregado TEXT");
     }
   });
 
@@ -212,7 +225,7 @@ app.get("/api/usuarios", (req, res) => {
   db.all(sql, params, (err, rows) => res.json(rows || []));
 });
 
-// OBTENER USUARIO POR ID (NUEVO)
+// OBTENER USUARIO POR ID
 app.get("/api/usuarios/:id", (req, res) => {
   db.get(
     `SELECT id, usuario, rol, telefono, tarjeta, expo_push_token
@@ -231,6 +244,7 @@ app.get("/api/usuarios/:id", (req, res) => {
   );
 });
 
+// CREAR USUARIO
 app.post("/api/usuarios", (req, res) => {
   const { usuario, password, rol, telefono, tarjeta } = req.body;
 
@@ -246,6 +260,7 @@ app.post("/api/usuarios", (req, res) => {
   );
 });
 
+// ACTUALIZAR USUARIO
 app.put("/api/usuarios/:id", (req, res) => {
   const { usuario, password, telefono, tarjeta } = req.body;
 
@@ -260,13 +275,14 @@ app.put("/api/usuarios/:id", (req, res) => {
   );
 });
 
+// ELIMINAR USUARIO
 app.delete("/api/usuarios/:id", (req, res) => {
   db.run("DELETE FROM usuarios WHERE id = ?", [req.params.id], () =>
     res.json({ mensaje: "Usuario eliminado" })
   );
 });
 
-// Guardar token de notificaciones para un usuario
+// GUARDAR TOKEN EXPO DEL USUARIO
 app.post("/api/usuarios/:id/token", (req, res) => {
   const { expo_push_token } = req.body;
 
@@ -663,22 +679,22 @@ app.put("/api/pedidos/:id/asignar", (req, res) => {
         [pedidoId],
         (e2, p) => {
           if (!e2 && p) {
-            // Notificar al gestor: pedido aprobado
+            // Notificar gestor
             if (p.token_gestor) {
               enviarPush(
                 p.token_gestor,
                 "Pedido aprobado",
-                `Tu pedido #${p.id} fue aprobado y asignado a un repartidor`,
+                `Tu pedido #${p.id} fue aprobado y asignado`,
                 { tipo: "pedido_aprobado", id_pedido: p.id }
               );
             }
 
-            // Notificar al repartidor: nuevo pedido asignado
+            // Notificar repartidor
             if (p.token_repartidor) {
               enviarPush(
                 p.token_repartidor,
-                "Nuevo pedido asignado",
-                `Tienes un nuevo pedido #${p.id} para entregar`,
+                "Nuevo pedido",
+                `Tienes asignado el pedido #${p.id}`,
                 { tipo: "pedido_asignado", id_pedido: p.id }
               );
             }
@@ -709,7 +725,7 @@ app.put("/api/pedidos/rechazar/:id", (req, res) => {
         return res.status(500).json({ error: "Error rechazando pedido" });
       }
 
-      // Buscar gestor y notificar
+      // Notificar al gestor
       db.get(
         `
         SELECT p.*, u.expo_push_token AS token_gestor
@@ -723,12 +739,12 @@ app.put("/api/pedidos/rechazar/:id", (req, res) => {
             enviarPush(
               p.token_gestor,
               "Pedido rechazado",
-              `Tu pedido #${p.id} fue rechazado por la empresa`,
+              `Tu pedido #${p.id} fue rechazado`,
               { tipo: "pedido_rechazado", id_pedido: p.id }
             );
           }
 
-          res.json({ mensaje: "Pedido rechazado correctamente" });
+          res.json({ mensaje: "Pedido rechazado" });
         }
       );
     }
@@ -802,7 +818,7 @@ app.post("/api/pedidos/:id/entregar", (req, res) => {
         return res.status(500).json({ error: "Error entregando pedido" });
       }
 
-      // Buscar info del pedido y token del gestor
+      // Notificar gestor
       db.get(
         `
         SELECT p.*, ug.expo_push_token AS token_gestor
@@ -816,12 +832,12 @@ app.post("/api/pedidos/:id/entregar", (req, res) => {
             enviarPush(
               p.token_gestor,
               "Pedido entregado",
-              `Tu pedido #${p.id} fue entregado correctamente`,
+              `Tu pedido #${p.id} fue entregado`,
               { tipo: "pedido_entregado", id_pedido: p.id }
             );
           }
 
-          // Notificar a empresa
+          // Notificar empresa
           db.all(
             "SELECT expo_push_token FROM usuarios WHERE rol = 'empresa' AND expo_push_token IS NOT NULL",
             [],
@@ -889,9 +905,7 @@ app.get("/api/historial/domicilio/dia/:fecha", (req, res) => {
     [f],
     (err, rows) => {
       if (err)
-        return res
-          .status(500)
-          .json({ error: "Error historial domicilio" });
+        return res.status(500).json({ error: "Error historial domicilio" });
 
       res.json(rows || []);
     }
@@ -927,7 +941,7 @@ app.get("/api/historial/gestor/:id/:fecha", (req, res) => {
 });
 
 // ----------------------------------------
-// HISTORIAL REPARTIDOR
+// HISTORIAL POR REPARTIDOR
 // ----------------------------------------
 app.get("/api/historial/repartidor/:id/:fecha", (req, res) => {
   const id = req.params.id;
@@ -959,6 +973,9 @@ app.get("/api/historial/resumen/:fecha", (req, res) => {
   const fecha = req.params.fecha;
   const resumen = {};
 
+  // ----------------------------------------
+  // RESUMEN POR GESTOR
+  // ----------------------------------------
   db.all(
     `
     SELECT 
@@ -982,6 +999,9 @@ app.get("/api/historial/resumen/:fecha", (req, res) => {
 
       resumen.gestores = filasGestores || [];
 
+      // ----------------------------------------
+      // RESUMEN POR PRODUCTO
+      // ----------------------------------------
       db.all(
         `
         SELECT
@@ -998,11 +1018,12 @@ app.get("/api/historial/resumen/:fecha", (req, res) => {
         [fecha],
         (err2, filasProductos) => {
           if (err2)
-            return res
-              .status(500)
-              .json({ error: "Error resumen productos" });
+            return res.status(500).json({
+              error: "Error resumen productos",
+            });
 
           resumen.productos = filasProductos || [];
+
           res.json(resumen);
         }
       );
