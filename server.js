@@ -7,7 +7,6 @@ const sqlite3 = require("sqlite3").verbose();
 const path = require("path");
 const multer = require("multer");
 const fs = require("fs");
-const fastcsv = require("fast-csv");  // CSV
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -15,20 +14,22 @@ const PORT = process.env.PORT || 4000;
 app.use(cors());
 app.use(express.json());
 
-// --------------------------
-// FECHA LOCAL CUBA UTC-5
-// --------------------------
+// ----------------------------------------
+// FUNCION HORA LOCAL (CUBA UTC-5)
+// ----------------------------------------
 function ahora() {
   const date = new Date();
   date.setHours(date.getHours() - 5); // Ajuste UTC-5
   return date.toISOString().replace("T", " ").split(".")[0];
 }
 
-// --------------------------
-// NOTIFICACIONES EXPO
-// --------------------------
+// ----------------------------------------
+// FUNCION PARA ENVIAR NOTIFICACIONES EXPO
+// ----------------------------------------
 async function enviarPush(expoToken, titulo, cuerpo, dataExtra = {}) {
-  if (!expoToken || !expoToken.startsWith("ExponentPushToken")) return;
+  if (!expoToken || !expoToken.startsWith("ExponentPushToken")) {
+    return;
+  }
 
   try {
     await fetch("https://exp.host/--/api/v2/push/send", {
@@ -51,17 +52,18 @@ async function enviarPush(expoToken, titulo, cuerpo, dataExtra = {}) {
   }
 }
 
-// --------------------------
+// ----------------------------------------
 // RUTA PARA IMAGENES
-// --------------------------
+// ----------------------------------------
 const IMAGES_PATH = path.join(__dirname, "public", "images");
-if (!fs.existsSync(IMAGES_PATH)) fs.mkdirSync(IMAGES_PATH, { recursive: true });
-
+if (!fs.existsSync(IMAGES_PATH)) {
+  fs.mkdirSync(IMAGES_PATH, { recursive: true });
+}
 app.use("/images", express.static(IMAGES_PATH));
 
-// --------------------------
-// MULTER IMAGENES
-// --------------------------
+// ----------------------------------------
+// MULTER PARA IMAGENES
+// ----------------------------------------
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, IMAGES_PATH),
   filename: (req, file, cb) => {
@@ -71,9 +73,16 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage });
 
-// --------------------------
+// MULTER PARA CSV INVENTARIO
+const CSV_PATH = path.join(__dirname, "uploads");
+if (!fs.existsSync(CSV_PATH)) {
+  fs.mkdirSync(CSV_PATH, { recursive: true });
+}
+const uploadCsv = multer({ dest: CSV_PATH });
+
+// ----------------------------------------
 // BASE DE DATOS
-// --------------------------
+// ----------------------------------------
 const DB_PATH = path.join(__dirname, "data", "database.sqlite");
 
 const db = new sqlite3.Database(DB_PATH, (err) => {
@@ -81,9 +90,9 @@ const db = new sqlite3.Database(DB_PATH, (err) => {
   else console.log("SQLite funcionando en:", DB_PATH);
 });
 
-// --------------------------
+// ----------------------------------------
 // CREAR TABLAS
-// --------------------------
+// ----------------------------------------
 db.serialize(() => {
   db.run(`
     CREATE TABLE IF NOT EXISTS usuarios (
@@ -142,13 +151,14 @@ db.serialize(() => {
     )
   `);
 
-  // Agregar columnas faltantes si no existen
+  // Asegurar columna fecha_entregado en pedidos
   db.all("PRAGMA table_info(pedidos)", (err, rows) => {
     if (!rows.some((c) => c.name === "fecha_entregado")) {
       db.run("ALTER TABLE pedidos ADD COLUMN fecha_entregado TEXT");
     }
   });
 
+  // Asegurar columna expo_push_token en usuarios
   db.all("PRAGMA table_info(usuarios)", (err, rows) => {
     if (!rows.some((c) => c.name === "expo_push_token")) {
       db.run("ALTER TABLE usuarios ADD COLUMN expo_push_token TEXT");
@@ -169,9 +179,9 @@ db.serialize(() => {
   });
 });
 
-// --------------------------
+// ----------------------------------------
 // LOGIN
-// --------------------------
+// ----------------------------------------
 app.post("/api/login", (req, res) => {
   const { usuario, password } = req.body;
 
@@ -186,9 +196,9 @@ app.post("/api/login", (req, res) => {
   );
 });
 
-// --------------------------
+// ----------------------------------------
 // CRUD USUARIOS
-// --------------------------
+// ----------------------------------------
 app.get("/api/usuarios", (req, res) => {
   const { rol } = req.query;
   let sql = "SELECT * FROM usuarios";
@@ -200,6 +210,25 @@ app.get("/api/usuarios", (req, res) => {
   }
 
   db.all(sql, params, (err, rows) => res.json(rows || []));
+});
+
+// OBTENER USUARIO POR ID (NUEVO)
+app.get("/api/usuarios/:id", (req, res) => {
+  db.get(
+    `SELECT id, usuario, rol, telefono, tarjeta, expo_push_token
+     FROM usuarios
+     WHERE id = ?`,
+    [req.params.id],
+    (err, row) => {
+      if (err) {
+        return res.status(500).json({ error: "Error obteniendo usuario" });
+      }
+      if (!row) {
+        return res.status(404).json({ error: "Usuario no encontrado" });
+      }
+      res.json(row);
+    }
+  );
 });
 
 app.post("/api/usuarios", (req, res) => {
@@ -237,15 +266,9 @@ app.delete("/api/usuarios/:id", (req, res) => {
   );
 });
 
-// --------------------------
-// GUARDAR TOKEN EXPO DEL USUARIO
-// --------------------------
+// Guardar token de notificaciones para un usuario
 app.post("/api/usuarios/:id/token", (req, res) => {
   const { expo_push_token } = req.body;
-
-  if (!expo_push_token) {
-    return res.status(400).json({ error: "Falta expo_push_token" });
-  }
 
   db.run(
     `
@@ -253,7 +276,7 @@ app.post("/api/usuarios/:id/token", (req, res) => {
     SET expo_push_token = ?
     WHERE id = ?
     `,
-    [expo_push_token, req.params.id],
+    [expo_push_token || null, req.params.id],
     (err) => {
       if (err) {
         return res.status(500).json({ error: "Error guardando token" });
@@ -263,10 +286,9 @@ app.post("/api/usuarios/:id/token", (req, res) => {
   );
 });
 
-// =====================================================
-//   INVENTARIO CRUD + EXPORTAR / IMPORTAR (CSV)
-// =====================================================
-
+// ----------------------------------------
+// INVENTARIO CRUD
+// ----------------------------------------
 app.get("/api/inventario", (req, res) => {
   db.all("SELECT * FROM inventario ORDER BY id DESC", [], (err, rows) =>
     res.json(rows || [])
@@ -276,9 +298,7 @@ app.get("/api/inventario", (req, res) => {
 app.post("/api/inventario", upload.single("imagen"), (req, res) => {
   const { nombre, descripcion, precio_base, cantidad } = req.body;
 
-  if (!req.file) {
-    return res.status(400).json({ error: "Debe subir una imagen" });
-  }
+  if (!req.file) return res.status(400).json({ error: "Debe subir una imagen" });
 
   db.run(
     `
@@ -314,102 +334,91 @@ app.delete("/api/inventario/:id", (req, res) => {
   );
 });
 
-// -----------------------------------------------------
 // EXPORTAR INVENTARIO A CSV
-// GET /api/inventario/export
-// -----------------------------------------------------
 app.get("/api/inventario/export", (req, res) => {
   db.all("SELECT * FROM inventario ORDER BY id ASC", [], (err, rows) => {
     if (err) {
-      return res.status(500).json({ error: "Error leyendo inventario" });
+      return res.status(500).json({ error: "Error exportando inventario" });
     }
 
-    // Cabecera del CSV
-    let csvData = "id,nombre,descripcion,precio_base,cantidad,imagen\n";
-
-    rows.forEach((r) => {
-      // Limpieza basica de comas y saltos
-      const nombre = (r.nombre || "").toString().replace(/,/g, " ");
-      const desc = (r.descripcion || "").toString().replace(/,/g, " ");
-      const imagen = (r.imagen || "").toString().replace(/,/g, " ");
-
-      csvData += `${r.id},${nombre},${desc},${r.precio_base},${r.cantidad},${imagen}\n`;
-    });
-
-    res.setHeader("Content-Type", "text/csv");
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
     res.setHeader(
       "Content-Disposition",
-      "attachment; filename=inventario.csv"
+      'attachment; filename="inventario.csv"'
     );
-    res.send(csvData);
+
+    const header = "id,nombre,descripcion,precio_base,cantidad,imagen,fecha_creacion\n";
+    const lines = (rows || []).map((r) => {
+      const nombre = (r.nombre || "").replace(/"/g, '""');
+      const desc = (r.descripcion || "").replace(/"/g, '""');
+      const img = (r.imagen || "").replace(/"/g, '""');
+      return `${r.id},"${nombre}","${desc}",${r.precio_base || 0},${r.cantidad || 0},"${img}",${r.fecha_creacion || ""}`;
+    });
+
+    res.send(header + lines.join("\n"));
   });
 });
 
-// -----------------------------------------------------
 // IMPORTAR INVENTARIO DESDE CSV
-// POST /api/inventario/import (campo "archivo")
-// -----------------------------------------------------
-
-// carpeta para CSV temporales (dentro de /data, que ya es persistente en Render)
-const CSV_UPLOAD_PATH = path.join(__dirname, "data", "uploads");
-if (!fs.existsSync(CSV_UPLOAD_PATH)) {
-  fs.mkdirSync(CSV_UPLOAD_PATH, { recursive: true });
-}
-const uploadCSV = multer({ dest: CSV_UPLOAD_PATH });
-
-app.post("/api/inventario/import", uploadCSV.single("archivo"), (req, res) => {
+app.post("/api/inventario/import", uploadCsv.single("csv"), (req, res) => {
   if (!req.file) {
-    return res.status(400).json({ error: "No se envio ningun archivo" });
+    return res.status(400).json({ error: "No se recibio el archivo CSV" });
   }
 
   const filePath = req.file.path;
-  const items = [];
 
-  fs.createReadStream(filePath)
-    .pipe(fastcsv.parse({ headers: true }))
-    .on("error", (error) => {
-      console.error("Error leyendo CSV:", error);
-      res.status(500).json({ error: "Error leyendo CSV" });
-    })
-    .on("data", (row) => {
-      items.push(row);
-    })
-    .on("end", () => {
-      db.serialize(() => {
-        const stmt = db.prepare(
-          `
-          INSERT OR REPLACE INTO inventario
-          (id, nombre, descripcion, precio_base, cantidad, imagen)
-          VALUES (?, ?, ?, ?, ?, ?)
+  fs.readFile(filePath, "utf8", (err, content) => {
+    if (err) {
+      return res.status(500).json({ error: "Error leyendo CSV" });
+    }
+
+    const lineas = content.split(/\r?\n/).filter((l) => l.trim() !== "");
+    // Saltar encabezado
+    lineas.shift();
+
+    db.serialize(() => {
+      db.run("DELETE FROM inventario");
+
+      const stmt = db.prepare(
         `
+        INSERT INTO inventario
+        (nombre, descripcion, precio_base, cantidad, imagen, fecha_creacion)
+        VALUES (?, ?, ?, ?, ?, ?)
+        `
+      );
+
+      lineas.forEach((line) => {
+        const cols = line.split(",");
+
+        if (cols.length < 5) return;
+
+        const nombre = cols[1]?.replace(/^"|"$/g, "") || "";
+        const descripcion = cols[2]?.replace(/^"|"$/g, "") || "";
+        const precio_base = parseFloat(cols[3]) || 0;
+        const cantidad = parseInt(cols[4]) || 0;
+        const imagen = cols[5]?.replace(/^"|"$/g, "") || "";
+
+        stmt.run(
+          nombre,
+          descripcion,
+          precio_base,
+          cantidad,
+          imagen,
+          ahora()
         );
-
-        items.forEach((p) => {
-          const id = p.id ? Number(p.id) : null;
-          const nombre = p.nombre || "";
-          const descripcion = p.descripcion || "";
-          const precio_base = Number(p.precio_base || 0);
-          const cantidad = Number(p.cantidad || 0);
-          const imagen = p.imagen || "";
-
-          stmt.run(id, nombre, descripcion, precio_base, cantidad, imagen);
-        });
-
-        stmt.finalize();
       });
 
-      // borrar archivo temporal
-      fs.unlink(filePath, () => {});
-
-      res.json({ ok: true, mensaje: "Inventario importado correctamente" });
+      stmt.finalize(() => {
+        fs.unlink(filePath, () => {});
+        res.json({ mensaje: "Inventario importado correctamente" });
+      });
     });
+  });
 });
 
-// =====================================================
-//                 PEDIDOS - CRUD PRINCIPAL
-// =====================================================
-
-// Crear pedido
+// ----------------------------------------
+// CREAR PEDIDO
+// ----------------------------------------
 app.post("/api/pedidos", (req, res) => {
   const {
     id_gestor,
@@ -423,9 +432,8 @@ app.post("/api/pedidos", (req, res) => {
     productos,
   } = req.body;
 
-  if (!productos || productos.length === 0) {
+  if (!productos || productos.length === 0)
     return res.status(400).json({ error: "No hay productos" });
-  }
 
   let totalProductos = 0;
   productos.forEach((p) => {
@@ -456,20 +464,15 @@ app.post("/api/pedidos", (req, res) => {
       ahora(),
     ],
     function (err) {
-      if (err) {
-        return res.status(500).json({ error: "Error creando pedido" });
-      }
+      if (err) return res.status(500).json({ error: "Error creando pedido" });
 
       const idPedido = this.lastID;
 
-      // Detalles del pedido + descuento de inventario
       productos.forEach((p) => {
         db.get(
           "SELECT precio_base FROM inventario WHERE id = ?",
           [p.id_producto],
           (err2, inv) => {
-            if (err2) return;
-
             const precioBase = inv ? inv.precio_base : 0;
             const gan = Number(p.precio_vendido) - Number(precioBase);
 
@@ -490,7 +493,6 @@ app.post("/api/pedidos", (req, res) => {
               ]
             );
 
-            // Descontar del inventario
             db.run(
               `
               UPDATE inventario
@@ -513,13 +515,7 @@ app.post("/api/pedidos", (req, res) => {
               enviarPush(
                 emp.expo_push_token,
                 "Nuevo pedido",
-                "El gestor " +
-                  nombre_gestor +
-                  " creo el pedido #" +
-                  idPedido +
-                  " (" +
-                  tipo_pedido +
-                  ")",
+                `El gestor ${nombre_gestor} creo el pedido #${idPedido} (${tipo_pedido})`,
                 { tipo: "nuevo_pedido", id_pedido: idPedido }
               );
             });
@@ -532,40 +528,45 @@ app.post("/api/pedidos", (req, res) => {
   );
 });
 
-// Listar todos los pedidos
+// ----------------------------------------
+// LISTAR TODOS LOS PEDIDOS
+// ----------------------------------------
 app.get("/api/pedidos", (req, res) => {
   db.all(
     "SELECT * FROM pedidos ORDER BY fecha_creacion DESC",
     [],
     (err, rows) => {
-      if (err) {
-        return res.status(500).json({ error: "Error leyendo pedidos" });
-      }
+      if (err) return res.status(500).json({ error: "Error leyendo pedidos" });
       res.json(rows || []);
     }
   );
 });
 
-// Pedidos de un gestor
+// ----------------------------------------
+// PEDIDOS POR GESTOR
+// ----------------------------------------
 app.get("/api/pedidos/gestor/:id", (req, res) => {
   db.all(
     `
-    SELECT *
-    FROM pedidos
+    SELECT * FROM pedidos
     WHERE id_gestor = ?
     ORDER BY fecha_creacion DESC
     `,
     [req.params.id],
     (err, rows) => {
-      if (err) {
-        return res.status(500).json({ error: "Error leyendo pedidos de gestor" });
-      }
+      if (err)
+        return res.status(500).json({
+          error: "Error leyendo pedidos de gestor",
+        });
+
       res.json(rows || []);
     }
   );
 });
 
-// Pedidos de un repartidor
+// ----------------------------------------
+// PEDIDOS POR REPARTIDOR
+// ----------------------------------------
 app.get("/api/pedidos/repartidor/:id", (req, res) => {
   db.all(
     `
@@ -576,15 +577,17 @@ app.get("/api/pedidos/repartidor/:id", (req, res) => {
     `,
     [req.params.id],
     (err, rows) => {
-      if (err) {
+      if (err)
         return res.status(500).json({ error: "Error pedidos repartidor" });
-      }
+
       res.json(rows || []);
     }
   );
 });
 
-// Detalle de un pedido
+// ----------------------------------------
+// DETALLE DE UN PEDIDO
+// ----------------------------------------
 app.get("/api/pedidos/:id", (req, res) => {
   const id = req.params.id;
 
@@ -599,12 +602,8 @@ app.get("/api/pedidos/:id", (req, res) => {
     `,
     [id],
     (err, pedido) => {
-      if (err) {
-        return res.status(500).json({ error: "Error leyendo pedido" });
-      }
-      if (!pedido) {
-        return res.status(404).json({ error: "No existe pedido" });
-      }
+      if (err) return res.status(500).json({ error: "Error leyendo pedido" });
+      if (!pedido) return res.status(404).json({ error: "No existe pedido" });
 
       db.all(
         `
@@ -618,11 +617,10 @@ app.get("/api/pedidos/:id", (req, res) => {
         `,
         [id],
         (err2, detalles) => {
-          if (err2) {
+          if (err2)
             return res
               .status(500)
               .json({ error: "Error leyendo detalle pedido" });
-          }
 
           res.json({ pedido, detalles: detalles || [] });
         }
@@ -631,9 +629,9 @@ app.get("/api/pedidos/:id", (req, res) => {
   );
 });
 
-// =====================================================
-//       APROBAR / ASIGNAR REPARTIDOR (EMPRESA)
-// =====================================================
+// ----------------------------------------
+// ASIGNAR REPARTIDOR (APROBAR)
+// ----------------------------------------
 app.put("/api/pedidos/:id/asignar", (req, res) => {
   const { id_repartidor } = req.body;
   const pedidoId = req.params.id;
@@ -654,11 +652,9 @@ app.put("/api/pedidos/:id/asignar", (req, res) => {
       // Buscar info del pedido, gestor y repartidor
       db.get(
         `
-        SELECT 
-          p.*,
-          ug.expo_push_token AS token_gestor,
-          ur.expo_push_token AS token_repartidor,
-          ur.usuario AS nombre_repartidor
+        SELECT p.*,
+               ug.expo_push_token AS token_gestor,
+               ur.expo_push_token AS token_repartidor
         FROM pedidos p
         LEFT JOIN usuarios ug ON ug.id = p.id_gestor
         LEFT JOIN usuarios ur ON ur.id = p.id_repartidor
@@ -667,22 +663,22 @@ app.put("/api/pedidos/:id/asignar", (req, res) => {
         [pedidoId],
         (e2, p) => {
           if (!e2 && p) {
-            // Notificar al gestor
+            // Notificar al gestor: pedido aprobado
             if (p.token_gestor) {
               enviarPush(
                 p.token_gestor,
                 "Pedido aprobado",
-                "Tu pedido #" + p.id + " fue aprobado y asignado a un repartidor",
+                `Tu pedido #${p.id} fue aprobado y asignado a un repartidor`,
                 { tipo: "pedido_aprobado", id_pedido: p.id }
               );
             }
 
-            // Notificar al repartidor
+            // Notificar al repartidor: nuevo pedido asignado
             if (p.token_repartidor) {
               enviarPush(
                 p.token_repartidor,
                 "Nuevo pedido asignado",
-                "Tienes un nuevo pedido #" + p.id + " para entregar",
+                `Tienes un nuevo pedido #${p.id} para entregar`,
                 { tipo: "pedido_asignado", id_pedido: p.id }
               );
             }
@@ -695,11 +691,10 @@ app.put("/api/pedidos/:id/asignar", (req, res) => {
   );
 });
 
-// =====================================================
-//                 RECHAZAR PEDIDO
-//  (IMPORTANTE: Ruta /api/pedidos/:id/rechazar)
-// =====================================================
-app.put("/api/pedidos/:id/rechazar", (req, res) => {
+// ----------------------------------------
+// RECHAZAR PEDIDO
+// ----------------------------------------
+app.put("/api/pedidos/rechazar/:id", (req, res) => {
   const pedidoId = req.params.id;
 
   db.run(
@@ -714,7 +709,7 @@ app.put("/api/pedidos/:id/rechazar", (req, res) => {
         return res.status(500).json({ error: "Error rechazando pedido" });
       }
 
-      // Buscar gestor para notificacion
+      // Buscar gestor y notificar
       db.get(
         `
         SELECT p.*, u.expo_push_token AS token_gestor
@@ -728,7 +723,7 @@ app.put("/api/pedidos/:id/rechazar", (req, res) => {
             enviarPush(
               p.token_gestor,
               "Pedido rechazado",
-              "Tu pedido #" + p.id + " fue rechazado por la empresa",
+              `Tu pedido #${p.id} fue rechazado por la empresa`,
               { tipo: "pedido_rechazado", id_pedido: p.id }
             );
           }
@@ -740,9 +735,9 @@ app.put("/api/pedidos/:id/rechazar", (req, res) => {
   );
 });
 
-// =====================================================
-//                   ENTREGAR PEDIDO
-// =====================================================
+// ----------------------------------------
+// ENTREGAR PEDIDO
+// ----------------------------------------
 app.post("/api/pedidos/:id/entregar", (req, res) => {
   const pedidoId = req.params.id;
 
@@ -771,7 +766,6 @@ app.post("/api/pedidos/:id/entregar", (req, res) => {
 
         const devolver = detalle.cantidad_pedida - entregada;
 
-        // Actualizar cantidad entregada
         db.run(
           `
           UPDATE pedido_detalle
@@ -781,7 +775,6 @@ app.post("/api/pedidos/:id/entregar", (req, res) => {
           [entregada, detalleId]
         );
 
-        // Devolver al inventario lo no entregado
         if (devolver > 0) {
           db.run(
             `
@@ -809,7 +802,7 @@ app.post("/api/pedidos/:id/entregar", (req, res) => {
         return res.status(500).json({ error: "Error entregando pedido" });
       }
 
-      // Info del pedido y token del gestor
+      // Buscar info del pedido y token del gestor
       db.get(
         `
         SELECT p.*, ug.expo_push_token AS token_gestor
@@ -823,7 +816,7 @@ app.post("/api/pedidos/:id/entregar", (req, res) => {
             enviarPush(
               p.token_gestor,
               "Pedido entregado",
-              "Tu pedido #" + p.id + " fue entregado correctamente",
+              `Tu pedido #${p.id} fue entregado correctamente`,
               { tipo: "pedido_entregado", id_pedido: p.id }
             );
           }
@@ -838,7 +831,7 @@ app.post("/api/pedidos/:id/entregar", (req, res) => {
                   enviarPush(
                     emp.expo_push_token,
                     "Pedido entregado",
-                    "El pedido #" + pedidoId + " ya fue entregado",
+                    `El pedido #${pedidoId} ya fue entregado`,
                     { tipo: "pedido_entregado", id_pedido: pedidoId }
                   );
                 });
@@ -853,11 +846,9 @@ app.post("/api/pedidos/:id/entregar", (req, res) => {
   );
 });
 
-// =====================================================
-//                  HISTORIAL / RESUMEN
-// =====================================================
-
-// Historial local por dia
+// ----------------------------------------
+// HISTORIAL LOCAL
+// ----------------------------------------
 app.get("/api/historial/local/dia/:fecha", (req, res) => {
   const f = req.params.fecha;
 
@@ -872,15 +863,17 @@ app.get("/api/historial/local/dia/:fecha", (req, res) => {
     `,
     [f],
     (err, rows) => {
-      if (err) {
+      if (err)
         return res.status(500).json({ error: "Error historial local" });
-      }
+
       res.json(rows || []);
     }
   );
 });
 
-// Historial domicilio por dia
+// ----------------------------------------
+// HISTORIAL DOMICILIO
+// ----------------------------------------
 app.get("/api/historial/domicilio/dia/:fecha", (req, res) => {
   const f = req.params.fecha;
 
@@ -895,15 +888,19 @@ app.get("/api/historial/domicilio/dia/:fecha", (req, res) => {
     `,
     [f],
     (err, rows) => {
-      if (err) {
-        return res.status(500).json({ error: "Error historial domicilio" });
-      }
+      if (err)
+        return res
+          .status(500)
+          .json({ error: "Error historial domicilio" });
+
       res.json(rows || []);
     }
   );
 });
 
-// Historial por gestor
+// ----------------------------------------
+// HISTORIAL POR GESTOR
+// ----------------------------------------
 app.get("/api/historial/gestor/:id/:fecha", (req, res) => {
   const id = req.params.id;
   const f = req.params.fecha;
@@ -919,15 +916,19 @@ app.get("/api/historial/gestor/:id/:fecha", (req, res) => {
     `,
     [id, f],
     (err, rows) => {
-      if (err) {
-        return res.status(500).json({ error: "Error historial gestor" });
-      }
+      if (err)
+        return res.status(500).json({
+          error: "Error historial gestor",
+        });
+
       res.json(rows || []);
     }
   );
 });
 
-// Historial por repartidor
+// ----------------------------------------
+// HISTORIAL REPARTIDOR
+// ----------------------------------------
 app.get("/api/historial/repartidor/:id/:fecha", (req, res) => {
   const id = req.params.id;
   const f = req.params.fecha;
@@ -943,17 +944,17 @@ app.get("/api/historial/repartidor/:id/:fecha", (req, res) => {
     `,
     [id, f],
     (err, rows) => {
-      if (err) {
-        return res
-          .status(500)
-          .json({ error: "Error historial repartidor" });
-      }
+      if (err)
+        return res.status(500).json({ error: "Error historial repartidor" });
+
       res.json(rows || []);
     }
   );
 });
 
-// Resumen del dia por gestor
+// ----------------------------------------
+// RESUMEN DEL DIA
+// ----------------------------------------
 app.get("/api/historial/resumen/:fecha", (req, res) => {
   const fecha = req.params.fecha;
   const resumen = {};
@@ -976,9 +977,8 @@ app.get("/api/historial/resumen/:fecha", (req, res) => {
     `,
     [fecha],
     (err, filasGestores) => {
-      if (err) {
+      if (err)
         return res.status(500).json({ error: "Error resumen gestores" });
-      }
 
       resumen.gestores = filasGestores || [];
 
@@ -997,11 +997,10 @@ app.get("/api/historial/resumen/:fecha", (req, res) => {
         `,
         [fecha],
         (err2, filasProductos) => {
-          if (err2) {
+          if (err2)
             return res
               .status(500)
               .json({ error: "Error resumen productos" });
-          }
 
           resumen.productos = filasProductos || [];
           res.json(resumen);
@@ -1011,9 +1010,9 @@ app.get("/api/historial/resumen/:fecha", (req, res) => {
   );
 });
 
-// =====================================================
-//              INICIAR SERVIDOR
-// =====================================================
+// ----------------------------------------
+// INICIAR SERVIDOR
+// ----------------------------------------
 app.listen(PORT, () => {
   console.log("Servidor API listo en puerto:", PORT);
 });
