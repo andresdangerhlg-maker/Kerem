@@ -9,20 +9,47 @@ const multer = require("multer");
 const fs = require("fs");
 
 const app = express();
-
-// Render port
 const PORT = process.env.PORT || 4000;
 
 app.use(cors());
 app.use(express.json());
 
 // --------------------------
-// FUNCION HORA LOCAL (UTC-5)
+// FUNCION HORA LOCAL (CUBA UTC-5)
 // --------------------------
 function ahora() {
   const date = new Date();
-  date.setHours(date.getHours() - 5); // Cuba UTC-5
+  date.setHours(date.getHours() - 5); // Ajuste UTC-5
   return date.toISOString().replace("T", " ").split(".")[0];
+}
+
+// --------------------------
+// FUNCION PARA ENVIAR NOTIFICACIONES EXPO
+// --------------------------
+async function enviarPush(expoToken, titulo, cuerpo, dataExtra = {}) {
+  if (!expoToken || !expoToken.startsWith("ExponentPushToken")) {
+    return;
+  }
+
+  try {
+    await fetch("https://exp.host/--/api/v2/push/send", {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Accept-encoding": "gzip, deflate",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        to: expoToken,
+        title: titulo,
+        body: cuerpo,
+        sound: "default",
+        data: dataExtra,
+      }),
+    });
+  } catch (e) {
+    console.log("Error enviando push:", e.message);
+  }
 }
 
 // --------------------------
@@ -35,7 +62,7 @@ if (!fs.existsSync(IMAGES_PATH)) {
 app.use("/images", express.static(IMAGES_PATH));
 
 // --------------------------
-// MULTER (subida de imágenes)
+// MULTER (subida de imagenes)
 // --------------------------
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, IMAGES_PATH),
@@ -67,7 +94,8 @@ db.serialize(() => {
       password TEXT,
       rol TEXT,
       telefono TEXT,
-      tarjeta TEXT
+      tarjeta TEXT,
+      expo_push_token TEXT
     )
   `);
 
@@ -116,14 +144,23 @@ db.serialize(() => {
     )
   `);
 
+  // Asegurar columna fecha_entregado en pedidos
   db.all("PRAGMA table_info(pedidos)", (err, rows) => {
     if (!rows.some((c) => c.name === "fecha_entregado")) {
       db.run("ALTER TABLE pedidos ADD COLUMN fecha_entregado TEXT");
     }
   });
 
+  // Asegurar columna expo_push_token en usuarios
+  db.all("PRAGMA table_info(usuarios)", (err, rows) => {
+    if (!rows.some((c) => c.name === "expo_push_token")) {
+      db.run("ALTER TABLE usuarios ADD COLUMN expo_push_token TEXT");
+    }
+  });
+
+  // Usuarios de prueba
   db.get("SELECT COUNT(*) AS total FROM usuarios", [], (err, row) => {
-    if (row.total === 0) {
+    if (row && row.total === 0) {
       db.run(`
         INSERT INTO usuarios (usuario, password, rol, telefono, tarjeta)
         VALUES
@@ -165,7 +202,7 @@ app.get("/api/usuarios", (req, res) => {
     params.push(rol);
   }
 
-  db.all(sql, params, (err, rows) => res.json(rows));
+  db.all(sql, params, (err, rows) => res.json(rows || []));
 });
 
 app.post("/api/usuarios", (req, res) => {
@@ -203,12 +240,36 @@ app.delete("/api/usuarios/:id", (req, res) => {
   );
 });
 
+// Guardar token de notificaciones para un usuario
+app.post("/api/usuarios/:id/token", (req, res) => {
+  const { expo_push_token } = req.body;
+
+  if (!expo_push_token) {
+    return res.status(400).json({ error: "Falta expo_push_token" });
+  }
+
+  db.run(
+    `
+    UPDATE usuarios
+    SET expo_push_token = ?
+    WHERE id = ?
+    `,
+    [expo_push_token, req.params.id],
+    (err) => {
+      if (err) {
+        return res.status(500).json({ error: "Error guardando token" });
+      }
+      res.json({ mensaje: "Token guardado" });
+    }
+  );
+});
+
 // --------------------------
 // INVENTARIO CRUD
 // --------------------------
 app.get("/api/inventario", (req, res) => {
   db.all("SELECT * FROM inventario ORDER BY id DESC", [], (err, rows) =>
-    res.json(rows)
+    res.json(rows || [])
   );
 });
 
@@ -340,7 +401,25 @@ app.post("/api/pedidos", (req, res) => {
         );
       });
 
-      res.json({ mensaje: "Pedido creado", id: idPedido });
+      // Notificar a empresa: nuevo pedido
+      db.all(
+        "SELECT expo_push_token FROM usuarios WHERE rol = 'empresa' AND expo_push_token IS NOT NULL",
+        [],
+        (e3, filasEmp) => {
+          if (!e3 && filasEmp && filasEmp.length > 0) {
+            filasEmp.forEach((emp) => {
+              enviarPush(
+                emp.expo_push_token,
+                "Nuevo pedido",
+                `El gestor ${nombre_gestor} creo el pedido #${idPedido} (${tipo_pedido})`,
+                { tipo: "nuevo_pedido", id_pedido: idPedido }
+              );
+            });
+          }
+
+          res.json({ mensaje: "Pedido creado", id: idPedido });
+        }
+      );
     }
   );
 });
@@ -354,7 +433,7 @@ app.get("/api/pedidos", (req, res) => {
     [],
     (err, rows) => {
       if (err) return res.status(500).json({ error: "Error leyendo pedidos" });
-      res.json(rows);
+      res.json(rows || []);
     }
   );
 });
@@ -376,14 +455,14 @@ app.get("/api/pedidos/gestor/:id", (req, res) => {
           error: "Error leyendo pedidos de gestor",
         });
 
-      res.json(rows);
+      res.json(rows || []);
     }
   );
 });
 
 // --------------------------
 // PEDIDOS POR REPARTIDOR
-// -------------------------
+// --------------------------
 app.get("/api/pedidos/repartidor/:id", (req, res) => {
   db.all(
     `
@@ -397,7 +476,7 @@ app.get("/api/pedidos/repartidor/:id", (req, res) => {
       if (err)
         return res.status(500).json({ error: "Error pedidos repartidor" });
 
-      res.json(rows);
+      res.json(rows || []);
     }
   );
 });
@@ -439,7 +518,7 @@ app.get("/api/pedidos/:id", (req, res) => {
               .status(500)
               .json({ error: "Error leyendo detalle pedido" });
 
-          res.json({ pedido, detalles });
+          res.json({ pedido, detalles: detalles || [] });
         }
       );
     }
@@ -451,6 +530,7 @@ app.get("/api/pedidos/:id", (req, res) => {
 // --------------------------
 app.put("/api/pedidos/:id/asignar", (req, res) => {
   const { id_repartidor } = req.body;
+  const pedidoId = req.params.id;
 
   db.run(
     `
@@ -459,12 +539,51 @@ app.put("/api/pedidos/:id/asignar", (req, res) => {
         id_repartidor = ?
     WHERE id = ?
     `,
-    [id_repartidor, req.params.id],
+    [id_repartidor, pedidoId],
     (err) => {
-      if (err)
+      if (err) {
         return res.status(500).json({ error: "Error asignando pedido" });
+      }
 
-      res.json({ mensaje: "Pedido aprobado y asignado" });
+      // Buscar info del pedido, gestor y repartidor
+      db.get(
+        `
+        SELECT p.*,
+               ug.expo_push_token AS token_gestor,
+               ur.expo_push_token AS token_repartidor,
+               ur.usuario AS nombre_repartidor
+        FROM pedidos p
+        LEFT JOIN usuarios ug ON ug.id = p.id_gestor
+        LEFT JOIN usuarios ur ON ur.id = p.id_repartidor
+        WHERE p.id = ?
+        `,
+        [pedidoId],
+        (e2, p) => {
+          if (!e2 && p) {
+            // Notificar al gestor: pedido aprobado
+            if (p.token_gestor) {
+              enviarPush(
+                p.token_gestor,
+                "Pedido aprobado",
+                `Tu pedido #${p.id} fue aprobado y asignado a un repartidor`,
+                { tipo: "pedido_aprobado", id_pedido: p.id }
+              );
+            }
+
+            // Notificar al repartidor: nuevo pedido asignado
+            if (p.token_repartidor) {
+              enviarPush(
+                p.token_repartidor,
+                "Nuevo pedido asignado",
+                `Tienes un nuevo pedido #${p.id} para entregar`,
+                { tipo: "pedido_asignado", id_pedido: p.id }
+              );
+            }
+          }
+
+          res.json({ mensaje: "Pedido aprobado y asignado" });
+        }
+      );
     }
   );
 });
@@ -473,18 +592,42 @@ app.put("/api/pedidos/:id/asignar", (req, res) => {
 // RECHAZAR PEDIDO
 // --------------------------
 app.put("/api/pedidos/rechazar/:id", (req, res) => {
+  const pedidoId = req.params.id;
+
   db.run(
     `
     UPDATE pedidos
     SET estado = 'rechazado'
     WHERE id = ?
     `,
-    [req.params.id],
+    [pedidoId],
     (err) => {
-      if (err)
+      if (err) {
         return res.status(500).json({ error: "Error rechazando pedido" });
+      }
 
-      res.json({ mensaje: "Pedido rechazado correctamente" });
+      // Buscar gestor y notificar
+      db.get(
+        `
+        SELECT p.*, u.expo_push_token AS token_gestor
+        FROM pedidos p
+        LEFT JOIN usuarios u ON u.id = p.id_gestor
+        WHERE p.id = ?
+        `,
+        [pedidoId],
+        (e2, p) => {
+          if (!e2 && p && p.token_gestor) {
+            enviarPush(
+              p.token_gestor,
+              "Pedido rechazado",
+              `Tu pedido #${p.id} fue rechazado por la empresa`,
+              { tipo: "pedido_rechazado", id_pedido: p.id }
+            );
+          }
+
+          res.json({ mensaje: "Pedido rechazado correctamente" });
+        }
+      );
     }
   );
 });
@@ -501,12 +644,12 @@ app.post("/api/pedidos/:id/entregar", (req, res) => {
     [];
 
   if (!Array.isArray(lista) || lista.length === 0) {
-    return res.status(400).json({ error: "Lista vacía" });
+    return res.status(400).json({ error: "Lista vacia" });
   }
 
   lista.forEach((item) => {
     const detalleId = item.detalle_id;
-    const entregada = Number(item.cantidad_entregada) || 0;
+    const entregada = Number(item.cantidad_entregada || 0);
 
     db.get(
       `
@@ -552,10 +695,50 @@ app.post("/api/pedidos/:id/entregar", (req, res) => {
     `,
     [ahora(), pedidoId],
     (err) => {
-      if (err)
+      if (err) {
         return res.status(500).json({ error: "Error entregando pedido" });
+      }
 
-      res.json({ mensaje: "Pedido entregado" });
+      // Buscar info del pedido y token del gestor
+      db.get(
+        `
+        SELECT p.*, ug.expo_push_token AS token_gestor
+        FROM pedidos p
+        LEFT JOIN usuarios ug ON ug.id = p.id_gestor
+        WHERE p.id = ?
+        `,
+        [pedidoId],
+        (e2, p) => {
+          if (!e2 && p && p.token_gestor) {
+            enviarPush(
+              p.token_gestor,
+              "Pedido entregado",
+              `Tu pedido #${p.id} fue entregado correctamente`,
+              { tipo: "pedido_entregado", id_pedido: p.id }
+            );
+          }
+
+          // Notificar a empresa
+          db.all(
+            "SELECT expo_push_token FROM usuarios WHERE rol = 'empresa' AND expo_push_token IS NOT NULL",
+            [],
+            (e3, filasEmp) => {
+              if (!e3 && filasEmp && filasEmp.length > 0) {
+                filasEmp.forEach((emp) => {
+                  enviarPush(
+                    emp.expo_push_token,
+                    "Pedido entregado",
+                    `El pedido #${pedidoId} ya fue entregado`,
+                    { tipo: "pedido_entregado", id_pedido: pedidoId }
+                  );
+                });
+              }
+
+              res.json({ mensaje: "Pedido entregado" });
+            }
+          );
+        }
+      );
     }
   );
 });
@@ -580,7 +763,7 @@ app.get("/api/historial/local/dia/:fecha", (req, res) => {
       if (err)
         return res.status(500).json({ error: "Error historial local" });
 
-      res.json(rows);
+      res.json(rows || []);
     }
   );
 });
@@ -607,7 +790,7 @@ app.get("/api/historial/domicilio/dia/:fecha", (req, res) => {
           .status(500)
           .json({ error: "Error historial domicilio" });
 
-      res.json(rows);
+      res.json(rows || []);
     }
   );
 });
@@ -635,7 +818,7 @@ app.get("/api/historial/gestor/:id/:fecha", (req, res) => {
           error: "Error historial gestor",
         });
 
-      res.json(rows);
+      res.json(rows || []);
     }
   );
 });
@@ -661,13 +844,13 @@ app.get("/api/historial/repartidor/:id/:fecha", (req, res) => {
       if (err)
         return res.status(500).json({ error: "Error historial repartidor" });
 
-      res.json(rows);
+      res.json(rows || []);
     }
   );
 });
 
 // --------------------------
-// RESUMEN DEL DÍA
+// RESUMEN DEL DIA
 // --------------------------
 app.get("/api/historial/resumen/:fecha", (req, res) => {
   const fecha = req.params.fecha;
