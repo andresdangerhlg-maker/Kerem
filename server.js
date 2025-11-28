@@ -10,25 +10,33 @@ const fs = require("fs");
 
 const app = express();
 
-// Render ignora el puerto local.
-// Usamos la variable de entorno si existe.
+// Render port
 const PORT = process.env.PORT || 4000;
 
 app.use(cors());
 app.use(express.json());
 
-// ------------------------
+// --------------------------
+// FUNCION HORA LOCAL (UTC-5)
+// --------------------------
+function ahora() {
+  const date = new Date();
+  date.setHours(date.getHours() - 5); // Cuba UTC-5
+  return date.toISOString().replace("T", " ").split(".")[0];
+}
+
+// --------------------------
 // RUTA PARA IMAGENES
-// ------------------------
+// --------------------------
 const IMAGES_PATH = path.join(__dirname, "public", "images");
 if (!fs.existsSync(IMAGES_PATH)) {
   fs.mkdirSync(IMAGES_PATH, { recursive: true });
 }
 app.use("/images", express.static(IMAGES_PATH));
 
-// ------------------------
-// MULTER - SUBIDA DE IMAGENES
-// ------------------------
+// --------------------------
+// MULTER (subida de imágenes)
+// --------------------------
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, IMAGES_PATH),
   filename: (req, file, cb) => {
@@ -38,9 +46,9 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage });
 
-// ------------------------
+// --------------------------
 // BASE DE DATOS
-// ------------------------
+// --------------------------
 const DB_PATH = path.join(__dirname, "data", "database.sqlite");
 
 const db = new sqlite3.Database(DB_PATH, (err) => {
@@ -48,11 +56,10 @@ const db = new sqlite3.Database(DB_PATH, (err) => {
   else console.log("SQLite funcionando en:", DB_PATH);
 });
 
-// ------------------------
+// --------------------------
 // CREAR TABLAS
-// ------------------------
+// --------------------------
 db.serialize(() => {
-  // Usuarios
   db.run(`
     CREATE TABLE IF NOT EXISTS usuarios (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -64,7 +71,6 @@ db.serialize(() => {
     )
   `);
 
-  // Inventario
   db.run(`
     CREATE TABLE IF NOT EXISTS inventario (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -77,7 +83,6 @@ db.serialize(() => {
     )
   `);
 
-  // Pedidos
   db.run(`
     CREATE TABLE IF NOT EXISTS pedidos (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -98,7 +103,6 @@ db.serialize(() => {
     )
   `);
 
-  // Detalles
   db.run(`
     CREATE TABLE IF NOT EXISTS pedido_detalle (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -112,14 +116,12 @@ db.serialize(() => {
     )
   `);
 
-  // Añadir fecha_entregado si falta
   db.all("PRAGMA table_info(pedidos)", (err, rows) => {
     if (!rows.some((c) => c.name === "fecha_entregado")) {
       db.run("ALTER TABLE pedidos ADD COLUMN fecha_entregado TEXT");
     }
   });
 
-  // Usuarios iniciales
   db.get("SELECT COUNT(*) AS total FROM usuarios", [], (err, row) => {
     if (row.total === 0) {
       db.run(`
@@ -133,10 +135,9 @@ db.serialize(() => {
   });
 });
 
-
-// ------------------------
+// --------------------------
 // LOGIN
-// ------------------------
+// --------------------------
 app.post("/api/login", (req, res) => {
   const { usuario, password } = req.body;
 
@@ -151,10 +152,9 @@ app.post("/api/login", (req, res) => {
   );
 });
 
-
-// ------------------------
+// --------------------------
 // CRUD USUARIOS
-// ------------------------
+// --------------------------
 app.get("/api/usuarios", (req, res) => {
   const { rol } = req.query;
   let sql = "SELECT * FROM usuarios";
@@ -203,10 +203,9 @@ app.delete("/api/usuarios/:id", (req, res) => {
   );
 });
 
-
-// ------------------------
+// --------------------------
 // INVENTARIO CRUD
-// ------------------------
+// --------------------------
 app.get("/api/inventario", (req, res) => {
   db.all("SELECT * FROM inventario ORDER BY id DESC", [], (err, rows) =>
     res.json(rows)
@@ -222,9 +221,9 @@ app.post("/api/inventario", upload.single("imagen"), (req, res) => {
     `
     INSERT INTO inventario
     (nombre, descripcion, precio_base, cantidad, imagen, fecha_creacion)
-    VALUES (?, ?, ?, ?, ?, datetime('now'))
+    VALUES (?, ?, ?, ?, ?, ?)
     `,
-    [nombre, descripcion, precio_base, cantidad, req.file.filename],
+    [nombre, descripcion, precio_base, cantidad, req.file.filename, ahora()],
     function () {
       res.json({ id: this.lastID, imagen: req.file.filename });
     }
@@ -252,10 +251,9 @@ app.delete("/api/inventario/:id", (req, res) => {
   );
 });
 
-
-// ------------------------
+// --------------------------
 // CREAR PEDIDO
-// ------------------------
+// --------------------------
 app.post("/api/pedidos", (req, res) => {
   const {
     id_gestor,
@@ -277,8 +275,7 @@ app.post("/api/pedidos", (req, res) => {
     totalProductos += Number(p.cantidad) * Number(p.precio_vendido);
   });
 
-  const totalGeneral =
-    totalProductos + (Number(precio_mensajeria) || 0);
+  const totalGeneral = totalProductos + (Number(precio_mensajeria) || 0);
 
   db.run(
     `
@@ -286,7 +283,7 @@ app.post("/api/pedidos", (req, res) => {
     (id_gestor, nombre_gestor, nombre_cliente, numero_cliente, direccion,
      tipo_pedido, horario, precio_mensajeria, estado, total_productos,
      total_general, id_repartidor, fecha_creacion, fecha_entregado)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pendiente', ?, ?, NULL, datetime('now'), NULL)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pendiente', ?, ?, NULL, ?, NULL)
     `,
     [
       id_gestor,
@@ -299,6 +296,7 @@ app.post("/api/pedidos", (req, res) => {
       precio_mensajeria,
       totalProductos,
       totalGeneral,
+      ahora(),
     ],
     function (err) {
       if (err) return res.status(500).json({ error: "Error creando pedido" });
@@ -347,10 +345,9 @@ app.post("/api/pedidos", (req, res) => {
   );
 });
 
-
-// ------------------------
+// --------------------------
 // LISTAR TODOS LOS PEDIDOS
-// ------------------------
+// --------------------------
 app.get("/api/pedidos", (req, res) => {
   db.all(
     "SELECT * FROM pedidos ORDER BY fecha_creacion DESC",
@@ -362,10 +359,9 @@ app.get("/api/pedidos", (req, res) => {
   );
 });
 
-
-// ------------------------
+// --------------------------
 // PEDIDOS POR GESTOR
-// ------------------------
+// --------------------------
 app.get("/api/pedidos/gestor/:id", (req, res) => {
   db.all(
     `
@@ -385,12 +381,10 @@ app.get("/api/pedidos/gestor/:id", (req, res) => {
   );
 });
 
-// -----------------------
-// NUEVO: PEDIDOS POR REPARTIDOR
-// -----------------------
+// --------------------------
+// PEDIDOS POR REPARTIDOR
+// -------------------------
 app.get("/api/pedidos/repartidor/:id", (req, res) => {
-  const id = req.params.id;
-
   db.all(
     `
     SELECT *
@@ -398,22 +392,19 @@ app.get("/api/pedidos/repartidor/:id", (req, res) => {
     WHERE id_repartidor = ?
     ORDER BY fecha_creacion DESC
     `,
-    [id],
+    [req.params.id],
     (err, rows) => {
-      if (err) {
-        return res
-          .status(500)
-          .json({ error: "Error leyendo pedidos repartidor" });
-      }
+      if (err)
+        return res.status(500).json({ error: "Error pedidos repartidor" });
+
       res.json(rows);
     }
   );
 });
 
-
-// ------------------------
-// DETALLE DE PEDIDO
-// ------------------------
+// --------------------------
+// DETALLE DE UN PEDIDO
+// --------------------------
 app.get("/api/pedidos/:id", (req, res) => {
   const id = req.params.id;
 
@@ -446,7 +437,7 @@ app.get("/api/pedidos/:id", (req, res) => {
           if (err2)
             return res
               .status(500)
-              .json({ error: "Error leyendo detalle de pedido" });
+              .json({ error: "Error leyendo detalle pedido" });
 
           res.json({ pedido, detalles });
         }
@@ -455,10 +446,9 @@ app.get("/api/pedidos/:id", (req, res) => {
   );
 });
 
-
-// ------------------------
-// APROBAR Y ASIGNAR REPARTIDOR
-// ------------------------
+// --------------------------
+// ASIGNAR REPARTIDOR (APROBAR)
+// --------------------------
 app.put("/api/pedidos/:id/asignar", (req, res) => {
   const { id_repartidor } = req.body;
 
@@ -473,40 +463,35 @@ app.put("/api/pedidos/:id/asignar", (req, res) => {
     (err) => {
       if (err)
         return res.status(500).json({ error: "Error asignando pedido" });
+
       res.json({ mensaje: "Pedido aprobado y asignado" });
     }
   );
 });
 
-
-// ------------------------
-// **NUEVO: RECHAZAR PEDIDO**
-// ------------------------
+// --------------------------
+// RECHAZAR PEDIDO
+// --------------------------
 app.put("/api/pedidos/rechazar/:id", (req, res) => {
-  const id = req.params.id;
-
   db.run(
     `
     UPDATE pedidos
     SET estado = 'rechazado'
     WHERE id = ?
     `,
-    [id],
+    [req.params.id],
     (err) => {
-      if (err) {
-        console.error("Error rechazando pedido:", err);
+      if (err)
         return res.status(500).json({ error: "Error rechazando pedido" });
-      }
 
-      return res.json({ mensaje: "Pedido rechazado correctamente" });
+      res.json({ mensaje: "Pedido rechazado correctamente" });
     }
   );
 });
 
-
-// ------------------------
+// --------------------------
 // ENTREGAR PEDIDO
-// ------------------------
+// --------------------------
 app.post("/api/pedidos/:id/entregar", (req, res) => {
   const pedidoId = req.params.id;
 
@@ -562,22 +547,22 @@ app.post("/api/pedidos/:id/entregar", (req, res) => {
     `
     UPDATE pedidos
     SET estado = 'entregado',
-        fecha_entregado = datetime('now')
+        fecha_entregado = ?
     WHERE id = ?
     `,
-    [pedidoId],
+    [ahora(), pedidoId],
     (err) => {
       if (err)
         return res.status(500).json({ error: "Error entregando pedido" });
+
       res.json({ mensaje: "Pedido entregado" });
     }
   );
 });
 
-
-// ------------------------
-// HISTORIALES
-// ------------------------
+// --------------------------
+// HISTORIAL LOCAL
+// --------------------------
 app.get("/api/historial/local/dia/:fecha", (req, res) => {
   const f = req.params.fecha;
 
@@ -587,13 +572,10 @@ app.get("/api/historial/local/dia/:fecha", (req, res) => {
     FROM pedidos
     WHERE tipo_pedido = 'local'
       AND estado = 'entregado'
-      AND (
-        (fecha_entregado IS NOT NULL AND DATE(fecha_entregado) = ?)
-        OR (fecha_entregado IS NULL AND DATE(fecha_creacion) = ?)
-      )
+      AND DATE(fecha_entregado) = ?
     ORDER BY fecha_creacion DESC
     `,
-    [f, f],
+    [f],
     (err, rows) => {
       if (err)
         return res.status(500).json({ error: "Error historial local" });
@@ -603,10 +585,9 @@ app.get("/api/historial/local/dia/:fecha", (req, res) => {
   );
 });
 
-
-// ----------------------------
+// --------------------------
 // HISTORIAL DOMICILIO
-// ----------------------------
+// --------------------------
 app.get("/api/historial/domicilio/dia/:fecha", (req, res) => {
   const f = req.params.fecha;
 
@@ -616,13 +597,10 @@ app.get("/api/historial/domicilio/dia/:fecha", (req, res) => {
     FROM pedidos
     WHERE tipo_pedido = 'domicilio'
       AND estado = 'entregado'
-      AND (
-        (fecha_entregado IS NOT NULL AND DATE(fecha_entregado) = ?)
-        OR (fecha_entregado IS NULL AND DATE(fecha_creacion) = ?)
-      )
+      AND DATE(fecha_entregado) = ?
     ORDER BY fecha_creacion DESC
     `,
-    [f, f],
+    [f],
     (err, rows) => {
       if (err)
         return res
@@ -634,10 +612,9 @@ app.get("/api/historial/domicilio/dia/:fecha", (req, res) => {
   );
 });
 
-
-// ----------------------------
+// --------------------------
 // HISTORIAL POR GESTOR
-// ----------------------------
+// --------------------------
 app.get("/api/historial/gestor/:id/:fecha", (req, res) => {
   const id = req.params.id;
   const f = req.params.fecha;
@@ -648,13 +625,10 @@ app.get("/api/historial/gestor/:id/:fecha", (req, res) => {
     FROM pedidos
     WHERE id_gestor = ?
       AND estado = 'entregado'
-      AND (
-        (fecha_entregado IS NOT NULL AND DATE(fecha_entregado) = ?)
-        OR (fecha_entregado IS NULL AND DATE(fecha_creacion) = ?)
-      )
+      AND DATE(fecha_entregado) = ?
     ORDER BY fecha_creacion DESC
     `,
-    [id, f, f],
+    [id, f],
     (err, rows) => {
       if (err)
         return res.status(500).json({
@@ -666,10 +640,9 @@ app.get("/api/historial/gestor/:id/:fecha", (req, res) => {
   );
 });
 
-
-// ----------------------------
-// HISTORIAL POR REPARTIDOR
-// ----------------------------
+// --------------------------
+// HISTORIAL REPARTIDOR
+// --------------------------
 app.get("/api/historial/repartidor/:id/:fecha", (req, res) => {
   const id = req.params.id;
   const f = req.params.fecha;
@@ -680,13 +653,10 @@ app.get("/api/historial/repartidor/:id/:fecha", (req, res) => {
     FROM pedidos
     WHERE id_repartidor = ?
       AND estado = 'entregado'
-      AND (
-        (fecha_entregado IS NOT NULL AND DATE(fecha_entregado) = ?)
-        OR (fecha_entregado IS NULL AND DATE(fecha_creacion) = ?)
-      )
+      AND DATE(fecha_entregado) = ?
     ORDER BY fecha_entregado DESC
     `,
-    [id, f, f],
+    [id, f],
     (err, rows) => {
       if (err)
         return res.status(500).json({ error: "Error historial repartidor" });
@@ -696,10 +666,9 @@ app.get("/api/historial/repartidor/:id/:fecha", (req, res) => {
   );
 });
 
-
-// ----------------------------
-// RESUMEN DEL DÍA POR GESTOR
-// ----------------------------
+// --------------------------
+// RESUMEN DEL DÍA
+// --------------------------
 app.get("/api/historial/resumen/:fecha", (req, res) => {
   const fecha = req.params.fecha;
   const resumen = {};
@@ -717,13 +686,10 @@ app.get("/api/historial/resumen/:fecha", (req, res) => {
     JOIN pedidos p ON p.id = d.id_pedido
     JOIN usuarios u ON u.id = p.id_gestor
     WHERE p.estado = 'entregado'
-      AND (
-        (p.fecha_entregado IS NOT NULL AND DATE(p.fecha_entregado) = ?)
-        OR (p.fecha_entregado IS NULL AND DATE(p.fecha_creacion) = ?)
-      )
+      AND DATE(p.fecha_entregado) = ?
     GROUP BY p.id_gestor
     `,
-    [fecha, fecha],
+    [fecha],
     (err, filasGestores) => {
       if (err)
         return res.status(500).json({ error: "Error resumen gestores" });
@@ -740,13 +706,10 @@ app.get("/api/historial/resumen/:fecha", (req, res) => {
         JOIN pedidos p ON p.id = d.id_pedido
         JOIN inventario i ON i.id = d.id_producto
         WHERE p.estado = 'entregado'
-          AND (
-            (p.fecha_entregado IS NOT NULL AND DATE(p.fecha_entregado) = ?)
-            OR (p.fecha_entregado IS NULL AND DATE(p.fecha_creacion) = ?)
-          )
+          AND DATE(p.fecha_entregado) = ?
         GROUP BY p.id_gestor, d.id_producto
         `,
-        [fecha, fecha],
+        [fecha],
         (err2, filasProductos) => {
           if (err2)
             return res
@@ -761,10 +724,9 @@ app.get("/api/historial/resumen/:fecha", (req, res) => {
   );
 });
 
-
-// ----------------------------
+// --------------------------
 // INICIAR SERVIDOR
-// ----------------------------
+// --------------------------
 app.listen(PORT, () => {
   console.log("Servidor API listo en puerto:", PORT);
 });
