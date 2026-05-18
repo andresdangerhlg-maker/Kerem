@@ -10,10 +10,26 @@ const fs = require("fs");
 
 const app = express();
 const PORT = process.env.PORT || 4000;
-const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
+let DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
 
-if (!fs.existsSync(DATA_DIR)) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
+function ensureWritableDir(dir) {
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  fs.accessSync(dir, fs.constants.W_OK);
+}
+
+try {
+  ensureWritableDir(DATA_DIR);
+} catch (err) {
+  const renderDiskPath = path.join(__dirname, "data");
+  if (DATA_DIR !== renderDiskPath) {
+    console.log("DATA_DIR no disponible, usando disco local persistente:", renderDiskPath);
+    DATA_DIR = renderDiskPath;
+    ensureWritableDir(DATA_DIR);
+  } else {
+    throw err;
+  }
 }
 
 app.use(cors());
