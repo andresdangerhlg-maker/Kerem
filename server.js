@@ -1,4 +1,4 @@
-// CanonJet / Kerem Backend
+﻿// CanonJet / Kerem Backend
 // Node + Express + SQLite + Multer
 
 const express = require("express");
@@ -10,6 +10,11 @@ const fs = require("fs");
 
 const app = express();
 const PORT = process.env.PORT || 4000;
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
+
+if (!fs.existsSync(DATA_DIR)) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+}
 
 app.use(cors());
 app.use(express.json());
@@ -55,7 +60,9 @@ async function enviarPush(expoToken, titulo, cuerpo, dataExtra = {}) {
 // ----------------------------------------
 // RUTA PARA IMAGENES
 // ----------------------------------------
-const IMAGES_PATH = path.join(__dirname, "public", "images");
+const IMAGES_PATH = process.env.IMAGES_DIR || (
+  process.env.DATA_DIR ? path.join(DATA_DIR, "images") : path.join(__dirname, "public", "images")
+);
 if (!fs.existsSync(IMAGES_PATH)) {
   fs.mkdirSync(IMAGES_PATH, { recursive: true });
 }
@@ -74,7 +81,9 @@ const storage = multer.diskStorage({
 const upload = multer({ storage });
 
 // MULTER PARA CSV INVENTARIO
-const CSV_PATH = path.join(__dirname, "uploads");
+const CSV_PATH = process.env.UPLOADS_DIR || (
+  process.env.DATA_DIR ? path.join(DATA_DIR, "uploads") : path.join(__dirname, "uploads")
+);
 if (!fs.existsSync(CSV_PATH)) {
   fs.mkdirSync(CSV_PATH, { recursive: true });
 }
@@ -83,11 +92,26 @@ const uploadCsv = multer({ dest: CSV_PATH });
 // ----------------------------------------
 // BASE DE DATOS
 // ----------------------------------------
-const DB_PATH = path.join(__dirname, "data", "database.sqlite");
+const DB_PATH = process.env.DB_PATH || path.join(DATA_DIR, "database.sqlite");
 
 const db = new sqlite3.Database(DB_PATH, (err) => {
   if (err) console.error("Error SQLite:", err.message);
   else console.log("SQLite funcionando en:", DB_PATH);
+});
+
+app.get("/", (req, res) => {
+  res.json({
+    ok: true,
+    name: "kerem-server",
+    message: "Servidor Kerem activo",
+  });
+});
+
+app.get("/healthz", (req, res) => {
+  db.get("SELECT 1 AS ok", [], (err) => {
+    if (err) return res.status(500).json({ ok: false, error: "sqlite" });
+    res.json({ ok: true });
+  });
 });
 
 // ----------------------------------------
@@ -152,9 +176,11 @@ db.serialize(() => {
       cantidad_entregada INTEGER,
       precio_base REAL,
       precio_vendido REAL,
-      ganancia REAL
+      ganancia REAL,
+      imagen_seleccionada TEXT
     )
   `);
+  db.run("ALTER TABLE pedido_detalle ADD COLUMN imagen_seleccionada TEXT", () => {});
 
   // --- TABLA ANUNCIOS (NUEVA)
   db.run(`
@@ -165,7 +191,17 @@ db.serialize(() => {
     )
   `);
 
-  // Asegurar columnas nuevas
+
+  // --- TABLA IMAGENES INVENTARIO
+  db.run(`
+    CREATE TABLE IF NOT EXISTS inventario_imagenes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id_producto INTEGER,
+      imagen TEXT,
+      orden INTEGER,
+      fecha_creacion TEXT
+    )
+  `);  // Asegurar columnas nuevas
   db.all("PRAGMA table_info(usuarios)", (err, rows) => {
     if (!rows.some((c) => c.name === "expo_push_token")) {
       db.run("ALTER TABLE usuarios ADD COLUMN expo_push_token TEXT");
@@ -178,6 +214,29 @@ db.serialize(() => {
     }
   });
 
+  // Migrar la imagen principal vieja a la tabla de imagenes multiples
+  db.all(
+    `
+    SELECT i.id, i.imagen
+    FROM inventario i
+    WHERE i.imagen IS NOT NULL
+      AND i.imagen <> ''
+      AND NOT EXISTS (
+        SELECT 1 FROM inventario_imagenes ii
+        WHERE ii.id_producto = i.id
+      )
+    `,
+    [],
+    (err, rows) => {
+      if (!err && rows && rows.length > 0) {
+        const stmt = db.prepare(
+          "INSERT INTO inventario_imagenes (id_producto, imagen, orden, fecha_creacion) VALUES (?, ?, 0, ?)"
+        );
+        rows.forEach((row) => stmt.run(row.id, row.imagen, ahora()));
+        stmt.finalize();
+      }
+    }
+  );
   // Usuarios de prueba
   db.get("SELECT COUNT(*) AS total FROM usuarios", [], (err, row) => {
     if (row && row.total === 0) {
@@ -262,19 +321,42 @@ app.post("/api/usuarios", (req, res) => {
 
 // ACTUALIZAR USUARIO
 app.put("/api/usuarios/:id", (req, res) => {
-  const { usuario, password, telefono, tarjeta } = req.body;
+  const { usuario, password, telefono, tarjeta, rol } = req.body;
+
+  const fields = [
+    "usuario = ?",
+    "telefono = ?",
+    "tarjeta = ?",
+  ];
+  const params = [usuario, telefono, tarjeta];
+
+  if (rol) {
+    fields.push("rol = ?");
+    params.push(rol);
+  }
+
+  if (password && String(password).trim() !== "") {
+    fields.push("password = ?");
+    params.push(password);
+  }
+
+  params.push(req.params.id);
 
   db.run(
     `
     UPDATE usuarios
-    SET usuario = ?, password = ?, telefono = ?, tarjeta = ?
+    SET ${fields.join(", ")}
     WHERE id = ?
     `,
-    [usuario, password, telefono, tarjeta, req.params.id],
-    () => res.json({ mensaje: "Usuario actualizado" })
+    params,
+    (err) => {
+      if (err) {
+        return res.status(500).json({ error: "Error actualizando usuario" });
+      }
+      res.json({ mensaje: "Usuario actualizado" });
+    }
   );
 });
-
 // ELIMINAR USUARIO
 app.delete("/api/usuarios/:id", (req, res) => {
   db.run("DELETE FROM usuarios WHERE id = ?", [req.params.id], () =>
@@ -305,16 +387,60 @@ app.post("/api/usuarios/:id/token", (req, res) => {
 // ----------------------------------------
 // INVENTARIO CRUD
 // ----------------------------------------
-app.get("/api/inventario", (req, res) => {
-  db.all("SELECT * FROM inventario ORDER BY id DESC", [], (err, rows) =>
-    res.json(rows || [])
+function adjuntarImagenes(productos, callback) {
+  const lista = productos || [];
+  if (lista.length === 0) return callback([]);
+
+  const ids = lista.map((p) => p.id);
+  const placeholders = ids.map(() => "?").join(",");
+
+  db.all(
+    `
+    SELECT id_producto, imagen
+    FROM inventario_imagenes
+    WHERE id_producto IN (${placeholders})
+    ORDER BY orden ASC, id ASC
+    `,
+    ids,
+    (err, imagenes) => {
+      const porProducto = new Map();
+      (imagenes || []).forEach((img) => {
+        const current = porProducto.get(img.id_producto) || [];
+        current.push(img.imagen);
+        porProducto.set(img.id_producto, current);
+      });
+
+      callback(
+        lista.map((producto) => {
+          const imagenesProducto = porProducto.get(producto.id) || [];
+          const imagenPrincipal = producto.imagen || imagenesProducto[0] || null;
+          return {
+            ...producto,
+            imagen: imagenPrincipal,
+            imagenes: imagenesProducto.length > 0 ? imagenesProducto : imagenPrincipal ? [imagenPrincipal] : [],
+          };
+        })
+      );
+    }
   );
+}
+
+app.get("/api/inventario", (req, res) => {
+  db.all("SELECT * FROM inventario ORDER BY id DESC", [], (err, rows) => {
+    if (err) return res.status(500).json({ error: "Error leyendo inventario" });
+    adjuntarImagenes(rows || [], (productos) => res.json(productos));
+  });
 });
 
-app.post("/api/inventario", upload.single("imagen"), (req, res) => {
+app.post("/api/inventario", upload.fields([{ name: "imagen", maxCount: 1 }, { name: "imagenes", maxCount: 20 }]), (req, res) => {
   const { nombre, descripcion, precio_base, cantidad } = req.body;
+  const files = [
+    ...((req.files && req.files.imagen) || []),
+    ...((req.files && req.files.imagenes) || []),
+  ];
 
-  if (!req.file) return res.status(400).json({ error: "Debe subir una imagen" });
+  if (files.length === 0) return res.status(400).json({ error: "Debe subir al menos una imagen" });
+  const imagenPrincipal = files[0].filename;
 
   db.run(
     `
@@ -322,16 +448,39 @@ app.post("/api/inventario", upload.single("imagen"), (req, res) => {
     (nombre, descripcion, precio_base, cantidad, imagen, fecha_creacion)
     VALUES (?, ?, ?, ?, ?, ?)
     `,
-    [nombre, descripcion, precio_base, cantidad, req.file.filename, ahora()],
-    function () {
-      res.json({ id: this.lastID, imagen: req.file.filename });
+    [nombre, descripcion, precio_base, cantidad, imagenPrincipal, ahora()],
+    function (err) {
+      if (err) return res.status(500).json({ error: "Error creando producto" });
+
+      const idProducto = this.lastID;
+      const stmt = db.prepare(
+        "INSERT INTO inventario_imagenes (id_producto, imagen, orden, fecha_creacion) VALUES (?, ?, ?, ?)"
+      );
+      files.forEach((file, index) => stmt.run(idProducto, file.filename, index, ahora()));
+      stmt.finalize(() => {
+        res.json({ id: idProducto, imagen: imagenPrincipal, imagenes: files.map((file) => file.filename) });
+      });
     }
   );
 });
 
-app.put("/api/inventario/:id", upload.single("imagen"), (req, res) => {
+app.put("/api/inventario/:id", upload.fields([{ name: "imagen", maxCount: 1 }, { name: "imagenes", maxCount: 20 }]), (req, res) => {
   const { nombre, descripcion, precio_base, cantidad, imagen_actual } = req.body;
-  const imagen = req.file ? req.file.filename : imagen_actual;
+  const files = [
+    ...((req.files && req.files.imagen) || []),
+    ...((req.files && req.files.imagenes) || []),
+  ];
+  const reemplazarImagenes = req.body.reemplazar_imagenes === "1";
+  let imagenesEliminar = [];
+  try {
+    imagenesEliminar = req.body.imagenes_eliminar ? JSON.parse(req.body.imagenes_eliminar) : [];
+  } catch (e) {
+    imagenesEliminar = [];
+  }
+  if (!Array.isArray(imagenesEliminar)) imagenesEliminar = [];
+  imagenesEliminar = imagenesEliminar.map((item) => String(item)).filter(Boolean);
+  const nuevaPrincipal = files.length > 0 ? files[0].filename : null;
+  const imagenInicial = nuevaPrincipal || imagen_actual;
 
   db.run(
     `
@@ -339,17 +488,90 @@ app.put("/api/inventario/:id", upload.single("imagen"), (req, res) => {
     SET nombre = ?, descripcion = ?, precio_base = ?, cantidad = ?, imagen = ?
     WHERE id = ?
     `,
-    [nombre, descripcion, precio_base, cantidad, imagen, req.params.id],
-    () => res.json({ mensaje: "Producto actualizado", imagen })
+    [nombre, descripcion, precio_base, cantidad, imagenInicial, req.params.id],
+    (err) => {
+      if (err) return res.status(500).json({ error: "Error actualizando producto" });
+
+      const insertar = () => {
+        const finalizar = () => {
+          db.all(
+            "SELECT imagen FROM inventario_imagenes WHERE id_producto = ? ORDER BY orden ASC, id ASC",
+            [req.params.id],
+            (selectErr, rows) => {
+              if (selectErr) return res.status(500).json({ error: "Error actualizando imagenes" });
+              const imagenes = (rows || []).map((row) => row.imagen);
+              const imagenFinal = imagenes.includes(imagenInicial) ? imagenInicial : imagenes[0] || null;
+              db.run("UPDATE inventario SET imagen = ? WHERE id = ?", [imagenFinal, req.params.id], () => {
+                res.json({ mensaje: "Producto actualizado", imagen: imagenFinal, imagenes });
+              });
+            }
+          );
+        };
+
+        if (files.length === 0) return finalizar();
+
+        db.get(
+          "SELECT COALESCE(MAX(orden), -1) AS maxOrden FROM inventario_imagenes WHERE id_producto = ?",
+          [req.params.id],
+          (ordenErr, row) => {
+            if (ordenErr) return res.status(500).json({ error: "Error actualizando imagenes" });
+            const startOrder = Number(row?.maxOrden ?? -1) + 1;
+            const stmt = db.prepare(
+              "INSERT INTO inventario_imagenes (id_producto, imagen, orden, fecha_creacion) VALUES (?, ?, ?, ?)"
+            );
+            files.forEach((file, index) => stmt.run(req.params.id, file.filename, startOrder + index, ahora()));
+            stmt.finalize(finalizar);
+          }
+        );
+      };
+
+      if (reemplazarImagenes || imagenesEliminar.length > 0) {
+        const params = [req.params.id];
+        let sql = "DELETE FROM inventario_imagenes WHERE id_producto = ?";
+        if (!reemplazarImagenes && imagenesEliminar.length > 0) {
+          sql += ` AND imagen IN (${imagenesEliminar.map(() => "?").join(",")})`;
+          params.push(...imagenesEliminar);
+        }
+        db.run(sql, params, insertar);
+      } else {
+        insertar();
+      }
+    }
   );
 });
 
 app.delete("/api/inventario/:id", (req, res) => {
-  db.run("DELETE FROM inventario WHERE id = ?", [req.params.id], () =>
-    res.json({ mensaje: "Producto eliminado" })
+  db.run("DELETE FROM inventario_imagenes WHERE id_producto = ?", [req.params.id], () => {
+    db.run("DELETE FROM inventario WHERE id = ?", [req.params.id], () =>
+      res.json({ mensaje: "Producto eliminado" })
+    );
+  });
+});
+app.put("/api/inventario/:id/descontar", (req, res) => {
+  const cantidad = Number(req.body.cantidad || 0);
+
+  if (!cantidad || cantidad <= 0) {
+    return res.status(400).json({ error: "Cantidad invalida" });
+  }
+
+  db.run(
+    `
+    UPDATE inventario
+    SET cantidad = cantidad - ?
+    WHERE id = ?
+    `,
+    [cantidad, req.params.id],
+    function (err) {
+      if (err) {
+        return res.status(500).json({ error: "Error descontando inventario" });
+      }
+      if (this.changes === 0) {
+        return res.status(404).json({ error: "Producto no encontrado" });
+      }
+      res.json({ mensaje: "Inventario actualizado" });
+    }
   );
 });
-
 // EXPORTAR INVENTARIO A CSV
 app.get("/api/inventario/export", (req, res) => {
   db.all("SELECT * FROM inventario ORDER BY id ASC", [], (err, rows) => {
@@ -496,8 +718,8 @@ app.post("/api/pedidos", (req, res) => {
               `
               INSERT INTO pedido_detalle
               (id_pedido, id_producto, cantidad_pedida, cantidad_entregada,
-               precio_base, precio_vendido, ganancia)
-              VALUES (?, ?, ?, 0, ?, ?, ?)
+               precio_base, precio_vendido, ganancia, imagen_seleccionada)
+              VALUES (?, ?, ?, 0, ?, ?, ?, ?)
               `,
               [
                 idPedido,
@@ -506,6 +728,7 @@ app.post("/api/pedidos", (req, res) => {
                 precioBase,
                 p.precio_vendido,
                 gan,
+                p.imagen_seleccionada || null,
               ]
             );
 
@@ -626,7 +849,13 @@ app.get("/api/pedidos/:id", (req, res) => {
         SELECT 
           d.*,
           i.nombre AS producto_nombre,
-          i.imagen AS producto_imagen
+          COALESCE(d.imagen_seleccionada, i.imagen) AS producto_imagen,
+          (
+            SELECT GROUP_CONCAT(ii.imagen, '|')
+            FROM inventario_imagenes ii
+            WHERE ii.id_producto = i.id
+            ORDER BY ii.orden ASC, ii.id ASC
+          ) AS producto_imagenes
         FROM pedido_detalle d
         JOIN inventario i ON i.id = d.id_producto
         WHERE d.id_pedido = ?
@@ -638,11 +867,164 @@ app.get("/api/pedidos/:id", (req, res) => {
               .status(500)
               .json({ error: "Error leyendo detalle pedido" });
 
-          res.json({ pedido, detalles: detalles || [] });
+          const normalizados = (detalles || []).map((detalle) => ({
+            ...detalle,
+            producto_imagenes: detalle.producto_imagenes
+              ? detalle.producto_imagenes.split("|").filter(Boolean)
+              : detalle.producto_imagen
+                ? [detalle.producto_imagen]
+                : [],
+          }));
+          res.json({ pedido, detalles: normalizados });
         }
       );
     }
   );
+});
+
+// ----------------------------------------
+// EDITAR PEDIDO (EMPRESA)
+// ----------------------------------------
+app.put("/api/pedidos/:id", (req, res) => {
+  const pedidoId = req.params.id;
+  const {
+    nombre_cliente,
+    numero_cliente,
+    direccion,
+    tipo_pedido,
+    horario,
+    precio_mensajeria,
+    detalles = [],
+  } = req.body;
+
+  if (!Array.isArray(detalles) || detalles.length === 0) {
+    return res.status(400).json({ error: "El pedido debe tener productos" });
+  }
+
+  db.get("SELECT * FROM pedidos WHERE id = ?", [pedidoId], (pedidoErr, pedido) => {
+    if (pedidoErr) return res.status(500).json({ error: "Error leyendo pedido" });
+    if (!pedido) return res.status(404).json({ error: "Pedido no encontrado" });
+    if (pedido.estado === "entregado") {
+      return res.status(400).json({ error: "No se puede editar un pedido entregado" });
+    }
+
+    db.all(
+      `
+      SELECT d.*, i.cantidad AS stock_actual
+      FROM pedido_detalle d
+      JOIN inventario i ON i.id = d.id_producto
+      WHERE d.id_pedido = ?
+      `,
+      [pedidoId],
+      (detalleErr, actuales) => {
+        if (detalleErr) return res.status(500).json({ error: "Error leyendo detalle pedido" });
+
+        const actualesPorId = new Map((actuales || []).map((item) => [Number(item.id), item]));
+        const editados = [];
+        let totalProductos = 0;
+
+        for (const item of detalles) {
+          const detalleId = Number(item.detalle_id);
+          const actual = actualesPorId.get(detalleId);
+          const cantidad = Number(item.cantidad_pedida);
+          const precioVendido = Number(item.precio_vendido);
+
+          if (!actual) return res.status(400).json({ error: `Detalle invalido: ${detalleId}` });
+          if (!Number.isFinite(cantidad) || cantidad <= 0) {
+            return res.status(400).json({ error: "Cantidad pedida invalida" });
+          }
+          if (!Number.isFinite(precioVendido) || precioVendido <= 0) {
+            return res.status(400).json({ error: "Precio de venta invalido" });
+          }
+
+          const diferencia = cantidad - Number(actual.cantidad_pedida || 0);
+          if (diferencia > Number(actual.stock_actual || 0)) {
+            return res.status(400).json({
+              error: `Stock insuficiente para editar ${actual.id_producto}. Disponible: ${actual.stock_actual}`,
+            });
+          }
+
+          totalProductos += cantidad * precioVendido;
+          editados.push({
+            actual,
+            cantidad,
+            precioVendido,
+            diferencia,
+            imagenSeleccionada: item.imagen_seleccionada || actual.imagen_seleccionada || null,
+          });
+        }
+
+        const mensajeria = Number(precio_mensajeria || 0);
+        const totalGeneral = totalProductos + mensajeria;
+
+        db.serialize(() => {
+          const stmtDetalle = db.prepare(
+            `
+            UPDATE pedido_detalle
+            SET cantidad_pedida = ?,
+                precio_vendido = ?,
+                ganancia = ?,
+                imagen_seleccionada = ?
+            WHERE id = ?
+            `
+          );
+          const stmtStock = db.prepare(
+            `
+            UPDATE inventario
+            SET cantidad = cantidad - ?
+            WHERE id = ?
+            `
+          );
+
+          editados.forEach(({ actual, cantidad, precioVendido, diferencia, imagenSeleccionada }) => {
+            stmtDetalle.run(
+              cantidad,
+              precioVendido,
+              precioVendido - Number(actual.precio_base || 0),
+              imagenSeleccionada,
+              actual.id
+            );
+            if (diferencia !== 0) {
+              stmtStock.run(diferencia, actual.id_producto);
+            }
+          });
+
+          stmtDetalle.finalize();
+          stmtStock.finalize();
+
+          db.run(
+            `
+            UPDATE pedidos
+            SET nombre_cliente = ?,
+                numero_cliente = ?,
+                direccion = ?,
+                tipo_pedido = ?,
+                horario = ?,
+                precio_mensajeria = ?,
+                total_productos = ?,
+                total_general = ?
+            WHERE id = ?
+            `,
+            [
+              nombre_cliente,
+              numero_cliente,
+              direccion,
+              tipo_pedido,
+              horario,
+              mensajeria,
+              totalProductos,
+              totalGeneral,
+              pedidoId,
+            ],
+            (updateErr) => {
+              if (updateErr) return res.status(500).json({ error: "Error actualizando pedido" });
+              res.json({ mensaje: "Pedido actualizado", total_productos: totalProductos, total_general: totalGeneral });
+            }
+          );
+        });
+      }
+    );
+  });
 });
 
 // ----------------------------------------
@@ -710,9 +1092,7 @@ app.put("/api/pedidos/:id/asignar", (req, res) => {
 // ----------------------------------------
 // RECHAZAR PEDIDO
 // ----------------------------------------
-app.put("/api/pedidos/rechazar/:id", (req, res) => {
-  const pedidoId = req.params.id;
-
+function rechazarPedido(pedidoId, res) {
   db.run(
     `
     UPDATE pedidos
@@ -749,119 +1129,181 @@ app.put("/api/pedidos/rechazar/:id", (req, res) => {
       );
     }
   );
+}
+
+app.put("/api/pedidos/rechazar/:id", (req, res) => {
+  rechazarPedido(req.params.id, res);
 });
 
+app.put("/api/pedidos/:id/rechazar", (req, res) => {
+  rechazarPedido(req.params.id, res);
+});
+
+// ----------------------------------------
+// BORRAR PEDIDOS RECHAZADOS
+// ----------------------------------------
+app.delete("/api/pedidos/rechazados", (req, res) => {
+  db.run(
+    "DELETE FROM pedido_detalle WHERE id_pedido IN (SELECT id FROM pedidos WHERE estado = 'rechazado')",
+    [],
+    (err) => {
+      if (err) {
+        return res.status(500).json({ error: "Error borrando detalle de rechazados" });
+      }
+
+      db.run("DELETE FROM pedidos WHERE estado = 'rechazado'", [], function (err2) {
+        if (err2) {
+          return res.status(500).json({ error: "Error borrando pedidos rechazados" });
+        }
+
+        res.json({ mensaje: "Pedidos rechazados eliminados", total: this.changes || 0 });
+      });
+    }
+  );
+});
 // ----------------------------------------
 // ENTREGAR PEDIDO
 // ----------------------------------------
 app.post("/api/pedidos/:id/entregar", (req, res) => {
   const pedidoId = req.params.id;
-
-  const lista =
-    req.body.productos_entregados ||
-    req.body.items ||
-    [];
+  const lista = req.body.productos_entregados || req.body.items || [];
 
   if (!Array.isArray(lista) || lista.length === 0) {
     return res.status(400).json({ error: "Lista vacia" });
   }
 
-  lista.forEach((item) => {
-    const detalleId = item.detalle_id;
-    const entregada = Number(item.cantidad_entregada || 0);
+  db.get("SELECT * FROM pedidos WHERE id = ?", [pedidoId], (pedidoErr, pedido) => {
+    if (pedidoErr) {
+      return res.status(500).json({ error: "Error leyendo pedido" });
+    }
+    if (!pedido) {
+      return res.status(404).json({ error: "Pedido no encontrado" });
+    }
+    if (pedido.estado === "entregado") {
+      return res.status(400).json({ error: "El pedido ya fue entregado" });
+    }
+    if (pedido.estado === "rechazado") {
+      return res.status(400).json({ error: "No se puede entregar un pedido rechazado" });
+    }
 
-    db.get(
+    db.all(
       `
-      SELECT id_producto, cantidad_pedida
+      SELECT id, id_producto, cantidad_pedida
       FROM pedido_detalle
-      WHERE id = ? AND id_pedido = ?
+      WHERE id_pedido = ?
       `,
-      [detalleId, pedidoId],
-      (err, detalle) => {
-        if (!detalle) return;
+      [pedidoId],
+      (detalleErr, detalles) => {
+        if (detalleErr) {
+          return res.status(500).json({ error: "Error leyendo detalle pedido" });
+        }
 
-        const devolver = detalle.cantidad_pedida - entregada;
+        const detallesPorId = new Map((detalles || []).map((d) => [Number(d.id), d]));
+        const entregas = [];
 
-        db.run(
-          `
-          UPDATE pedido_detalle
-          SET cantidad_entregada = ?
-          WHERE id = ?
-          `,
-          [entregada, detalleId]
-        );
+        for (const item of lista) {
+          const detalleId = Number(item.detalle_id);
+          const detalle = detallesPorId.get(detalleId);
+          const entregada = Number(item.cantidad_entregada || 0);
 
-        if (devolver > 0) {
+          if (!detalle) {
+            return res.status(400).json({ error: `Detalle invalido: ${detalleId}` });
+          }
+          if (!Number.isFinite(entregada) || entregada < 0) {
+            return res.status(400).json({ error: "Cantidad entregada invalida" });
+          }
+          if (entregada > Number(detalle.cantidad_pedida || 0)) {
+            return res.status(400).json({ error: "La entrega no puede superar la cantidad pedida" });
+          }
+
+          entregas.push({ detalle, entregada });
+        }
+
+        db.serialize(() => {
+          entregas.forEach(({ detalle, entregada }) => {
+            const devolver = Number(detalle.cantidad_pedida || 0) - entregada;
+
+            db.run(
+              `
+              UPDATE pedido_detalle
+              SET cantidad_entregada = ?
+              WHERE id = ?
+              `,
+              [entregada, detalle.id]
+            );
+
+            if (devolver > 0) {
+              db.run(
+                `
+                UPDATE inventario
+                SET cantidad = cantidad + ?
+                WHERE id = ?
+                `,
+                [devolver, detalle.id_producto]
+              );
+            }
+          });
+
           db.run(
             `
-            UPDATE inventario
-            SET cantidad = cantidad + ?
+            UPDATE pedidos
+            SET estado = 'entregado',
+                fecha_entregado = ?
             WHERE id = ?
             `,
-            [devolver, detalle.id_producto]
+            [ahora(), pedidoId],
+            (err) => {
+              if (err) {
+                return res.status(500).json({ error: "Error entregando pedido" });
+              }
+
+              // Notificar gestor
+              db.get(
+                `
+                SELECT p.*, ug.expo_push_token AS token_gestor
+                FROM pedidos p
+                LEFT JOIN usuarios ug ON ug.id = p.id_gestor
+                WHERE p.id = ?
+                `,
+                [pedidoId],
+                (e2, p) => {
+                  if (!e2 && p && p.token_gestor) {
+                    enviarPush(
+                      p.token_gestor,
+                      "Pedido entregado",
+                      `Tu pedido #${p.id} fue entregado`,
+                      { tipo: "pedido_entregado", id_pedido: p.id }
+                    );
+                  }
+
+                  // Notificar empresa
+                  db.all(
+                    "SELECT expo_push_token FROM usuarios WHERE rol = 'empresa' AND expo_push_token IS NOT NULL",
+                    [],
+                    (e3, filasEmp) => {
+                      if (!e3 && filasEmp && filasEmp.length > 0) {
+                        filasEmp.forEach((emp) => {
+                          enviarPush(
+                            emp.expo_push_token,
+                            "Pedido entregado",
+                            `El pedido #${pedidoId} ya fue entregado`,
+                            { tipo: "pedido_entregado", id_pedido: pedidoId }
+                          );
+                        });
+                      }
+
+                      res.json({ mensaje: "Pedido entregado" });
+                    }
+                  );
+                }
+              );
+            }
           );
-        }
+        });
       }
     );
   });
-
-  db.run(
-    `
-    UPDATE pedidos
-    SET estado = 'entregado',
-        fecha_entregado = ?
-    WHERE id = ?
-    `,
-    [ahora(), pedidoId],
-    (err) => {
-      if (err) {
-        return res.status(500).json({ error: "Error entregando pedido" });
-      }
-
-      // Notificar gestor
-      db.get(
-        `
-        SELECT p.*, ug.expo_push_token AS token_gestor
-        FROM pedidos p
-        LEFT JOIN usuarios ug ON ug.id = p.id_gestor
-        WHERE p.id = ?
-        `,
-        [pedidoId],
-        (e2, p) => {
-          if (!e2 && p && p.token_gestor) {
-            enviarPush(
-              p.token_gestor,
-              "Pedido entregado",
-              `Tu pedido #${p.id} fue entregado`,
-              { tipo: "pedido_entregado", id_pedido: p.id }
-            );
-          }
-
-          // Notificar empresa
-          db.all(
-            "SELECT expo_push_token FROM usuarios WHERE rol = 'empresa' AND expo_push_token IS NOT NULL",
-            [],
-            (e3, filasEmp) => {
-              if (!e3 && filasEmp && filasEmp.length > 0) {
-                filasEmp.forEach((emp) => {
-                  enviarPush(
-                    emp.expo_push_token,
-                    "Pedido entregado",
-                    `El pedido #${pedidoId} ya fue entregado`,
-                    { tipo: "pedido_entregado", id_pedido: pedidoId }
-                  );
-                });
-              }
-
-              res.json({ mensaje: "Pedido entregado" });
-            }
-          );
-        }
-      );
-    }
-  );
 });
-
 // ----------------------------------------
 // HISTORIAL LOCAL
 // ----------------------------------------

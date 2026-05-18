@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: kerem-server
+    runtime: node
+    plan: starter
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATA_DIR
+        value: /var/data
+    disk:
+      name: kerem-data
+      mountPath: /var/data
+      sizeGB: 1
