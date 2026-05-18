@@ -20,20 +20,20 @@ Variables de entorno:
 
 ```text
 NODE_ENV=production
-DATA_DIR=/var/data
+DATA_DIR=/opt/render/project/src/data
 ```
 
 Disco persistente:
 
 ```text
 Name: kerem-data
-Mount path: /var/data
+Mount path: /opt/render/project/src/data
 Size: 1 GB
 ```
 
 ## Importante
 
-Render borra los archivos escritos fuera del disco persistente cuando reinicia o redeploya. Por eso el servidor guarda en `/var/data`:
+Render borra los archivos escritos fuera del disco persistente cuando reinicia o redeploya. Por eso el servidor guarda en `/opt/render/project/src/data`:
 
 - `database.sqlite`
 - fotos del inventario

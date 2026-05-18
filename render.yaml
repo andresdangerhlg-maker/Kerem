@@ -12,8 +12,8 @@ services:
       - key: NODE_VERSION
         value: 20
       - key: DATA_DIR
-        value: /var/data
+        value: /opt/render/project/src/data
     disk:
       name: kerem-data
-      mountPath: /var/data
+      mountPath: /opt/render/project/src/data
       sizeGB: 1
